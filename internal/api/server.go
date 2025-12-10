@@ -609,25 +609,27 @@ func (s *Server) serveManagementControlPanel(c *gin.Context) {
 		c.AbortWithStatus(http.StatusNotFound)
 		return
 	}
-	filePath := managementasset.FilePath(s.configFilePath)
-	if strings.TrimSpace(filePath) == "" {
-		c.AbortWithStatus(http.StatusNotFound)
-		return
-	}
 
-	if _, err := os.Stat(filePath); err != nil {
-		if os.IsNotExist(err) {
-			go managementasset.EnsureLatestManagementHTML(context.Background(), managementasset.StaticDir(s.configFilePath), cfg.ProxyURL)
-			c.AbortWithStatus(http.StatusNotFound)
+	// Try to serve from disk first (allows updates without rebuilding)
+	filePath := managementasset.FilePath(s.configFilePath)
+	if filePath != "" {
+		if _, err := os.Stat(filePath); err == nil {
+			c.File(filePath)
 			return
 		}
+	}
 
-		log.WithError(err).Error("failed to stat management control panel asset")
-		c.AbortWithStatus(http.StatusInternalServerError)
+	// Fallback to embedded HTML
+	if managementasset.HasEmbeddedHTML() {
+		c.Data(http.StatusOK, "text/html; charset=utf-8", managementasset.GetEmbeddedHTML())
 		return
 	}
 
-	c.File(filePath)
+	// Try to download if neither disk nor embedded available
+	if filePath != "" {
+		go managementasset.EnsureLatestManagementHTML(context.Background(), managementasset.StaticDir(s.configFilePath), cfg.ProxyURL)
+	}
+	c.AbortWithStatus(http.StatusNotFound)
 }
 
 func (s *Server) enableKeepAlive(timeout time.Duration, onTimeout func()) {
@@ -1049,7 +1051,3 @@ func AuthMiddleware(manager *sdkaccess.Manager) gin.HandlerFunc {
 		}
 	}
 }
-
-
-
-

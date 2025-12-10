@@ -409,9 +409,9 @@ func (m *Manager) executeWithProvider(ctx context.Context, provider string, req 
 		return cliproxyexecutor.Response{}, &Error{Code: "provider_not_found", Message: "provider identifier is empty"}
 	}
 
-	// Translate canonical model ID to provider-specific ID
+	// Translate canonical model ID to provider-specific ID using registry
 	originalModel := req.Model
-	req.Model = registry.TranslateModelForProvider(req.Model, provider)
+	req.Model = registry.GetGlobalRegistry().GetModelIDForProvider(req.Model, provider)
 	if req.Model != originalModel {
 		log.Debugf("Translated model %s -> %s for provider %s", originalModel, req.Model, provider)
 	}
@@ -465,8 +465,8 @@ func (m *Manager) executeCountWithProvider(ctx context.Context, provider string,
 		return cliproxyexecutor.Response{}, &Error{Code: "provider_not_found", Message: "provider identifier is empty"}
 	}
 
-	// Translate canonical model ID to provider-specific ID
-	req.Model = registry.TranslateModelForProvider(req.Model, provider)
+	// Translate canonical model ID to provider-specific ID using registry
+	req.Model = registry.GetGlobalRegistry().GetModelIDForProvider(req.Model, provider)
 
 	tried := make(map[string]struct{})
 	var lastErr error
@@ -517,8 +517,8 @@ func (m *Manager) executeStreamWithProvider(ctx context.Context, provider string
 		return nil, &Error{Code: "provider_not_found", Message: "provider identifier is empty"}
 	}
 
-	// Translate canonical model ID to provider-specific ID
-	req.Model = registry.TranslateModelForProvider(req.Model, provider)
+	// Translate canonical model ID to provider-specific ID using registry
+	req.Model = registry.GetGlobalRegistry().GetModelIDForProvider(req.Model, provider)
 
 	tried := make(map[string]struct{})
 	var lastErr error

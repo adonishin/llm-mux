@@ -216,10 +216,9 @@ func (h *BaseAPIHandler) getRequestDetails(modelName string) (providers []string
 	} else if specifiedProvider != "" {
 		providers = []string{specifiedProvider}
 	} else {
-		// Try model family resolution first
-		if resolved := h.resolveModelFamily(normalizedModel); resolved != nil {
+		// Use registry's canonical index for unified routing
+		if resolved := h.resolveModelWithCanonical(normalizedModel); resolved != nil {
 			providers = resolved.Providers
-			// Keep canonical model - translation happens at execution time
 			normalizedModel = resolved.CanonicalModel
 		} else {
 			providers = util.GetProviderName(normalizedModel)
@@ -243,31 +242,26 @@ func (h *BaseAPIHandler) parseDynamicModel(modelName string) (providerName, mode
 	return "", modelName, false
 }
 
-// resolveModelFamily attempts to resolve a canonical model name to available providers.
-// Returns nil if no family match is found or no provider is available.
-// The canonical model ID is preserved for translation at execution time.
-type familyResolution struct {
-	Providers      []string // All available providers, sorted by priority
-	CanonicalModel string   // Original canonical model ID for translation
+// resolveModelWithCanonical uses registry's canonical index to find all providers
+// and their specific model IDs for a given model name.
+type modelResolution struct {
+	Providers      []string // All available providers
+	CanonicalModel string   // Canonical model ID for translation
 }
 
-func (h *BaseAPIHandler) resolveModelFamily(modelName string) *familyResolution {
-	if !registry.IsCanonicalID(modelName) {
+func (h *BaseAPIHandler) resolveModelWithCanonical(modelName string) *modelResolution {
+	mappings := registry.GetGlobalRegistry().GetProvidersWithModelID(modelName)
+	if len(mappings) == 0 {
 		return nil
 	}
 
-	// Get all available providers from registry
-	availableProviders := registry.GetGlobalRegistry().GetAvailableProviders()
-	if len(availableProviders) == 0 {
-		return nil
+	providers := make([]string, 0, len(mappings))
+	for _, m := range mappings {
+		providers = append(providers, m.Provider)
 	}
 
-	providers, found := registry.ResolveAllProviders(modelName, availableProviders)
-	if !found || len(providers) == 0 {
-		return nil
-	}
-
-	return &familyResolution{Providers: providers, CanonicalModel: modelName}
+	// Use the requested model name as canonical for translation
+	return &modelResolution{Providers: providers, CanonicalModel: modelName}
 }
 
 func cloneBytes(src []byte) []byte {

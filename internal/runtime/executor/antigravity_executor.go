@@ -135,6 +135,11 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 
 		reporter.publish(ctx, parseAntigravityUsage(bodyBytes))
 
+		// Debug: log raw response for Claude models to analyze format differences
+		if strings.Contains(req.Model, "claude") {
+			log.Infof("antigravity: RAW CLAUDE RESPONSE (model=%s):\n%s", req.Model, string(bodyBytes))
+		}
+
 		// Translate response using canonical translator
 		translatedResp, errTranslateResp := TranslateGeminiCLIResponseNonStream(e.cfg, from, bodyBytes, req.Model)
 		if errTranslateResp != nil {
@@ -177,6 +182,11 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 	defer reporter.trackFailure(ctx, &err)
 
 	from := opts.SourceFormat
+
+	// Debug: log incoming request for Claude models
+	if strings.Contains(req.Model, "claude") {
+		log.Infof("antigravity: INCOMING CLAUDE STREAM REQUEST (model=%s): %s", req.Model, string(req.Payload))
+	}
 
 	// Translate request using canonical translator
 	translated, errTranslate := TranslateToGeminiCLI(e.cfg, from, req.Model, bytes.Clone(req.Payload), true, req.Metadata)
@@ -255,8 +265,16 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 			streamState := NewAntigravityStreamState(opts.OriginalRequest)
 			messageID := "chatcmpl-" + req.Model
 
+			// Debug: track if this is a Claude model for logging
+			isClaudeModel := strings.Contains(req.Model, "claude")
+
 			for scanner.Scan() {
 				line := scanner.Bytes()
+
+				// Debug: log raw stream chunks for Claude models
+				if isClaudeModel {
+					log.Infof("antigravity: RAW CLAUDE STREAM CHUNK (model=%s): %s", req.Model, strings.ReplaceAll(string(line), "\n", "\\n"))
+				}
 
 				// Filter usage metadata for all models
 				// Only retain usage statistics in the terminal chunk
@@ -566,7 +584,6 @@ func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyau
 	if host := resolveHost(base); host != "" {
 		httpReq.Host = host
 	}
-
 
 	return httpReq, nil
 }

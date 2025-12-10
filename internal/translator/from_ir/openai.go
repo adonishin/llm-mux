@@ -413,10 +413,29 @@ func ToOpenAIChatCompletionMeta(messages []ir.Message, usage *ir.Usage, model, m
 }
 
 // ToOpenAIChunk converts event to OpenAI SSE streaming chunk.
+// ToOpenAIChunk converts event to OpenAI SSE streaming chunk.
 func ToOpenAIChunk(event ir.UnifiedEvent, model, messageID string, chunkIndex int) ([]byte, error) {
 	return ToOpenAIChunkMeta(event, model, messageID, chunkIndex, nil)
 }
 
+// openaiTextChunk is optimized struct for the most common case: text token streaming.
+// Using a fixed struct allows faster JSON encoding than map[string]any.
+type openaiTextChunk struct {
+	ID      string `json:"id"`
+	Object  string `json:"object"`
+	Created int64  `json:"created"`
+	Model   string `json:"model"`
+	Choices []struct {
+		Index int `json:"index"`
+		Delta struct {
+			Role    string `json:"role,omitempty"`
+			Content string `json:"content,omitempty"`
+		} `json:"delta"`
+	} `json:"choices"`
+}
+
+// ToOpenAIChunkMeta converts event to OpenAI SSE streaming chunk with metadata.
+// Optimized for the hot path (text tokens) using typed struct instead of map.
 func ToOpenAIChunkMeta(event ir.UnifiedEvent, model, messageID string, chunkIndex int, meta *ir.OpenAIMeta) ([]byte, error) {
 	responseID, created := messageID, time.Now().Unix()
 	if meta != nil {
@@ -428,6 +447,32 @@ func ToOpenAIChunkMeta(event ir.UnifiedEvent, model, messageID string, chunkInde
 		}
 	}
 
+	// Fast path: simple text token (most common case ~90% of chunks)
+	if event.Type == ir.EventTypeToken && event.Content != "" && event.Refusal == "" &&
+		event.Logprobs == nil && event.SystemFingerprint == "" {
+		chunk := openaiTextChunk{
+			ID:      responseID,
+			Object:  "chat.completion.chunk",
+			Created: created,
+			Model:   model,
+			Choices: make([]struct {
+				Index int `json:"index"`
+				Delta struct {
+					Role    string `json:"role,omitempty"`
+					Content string `json:"content,omitempty"`
+				} `json:"delta"`
+			}, 1),
+		}
+		chunk.Choices[0].Delta.Role = "assistant"
+		chunk.Choices[0].Delta.Content = event.Content
+		jsonBytes, err := json.Marshal(chunk)
+		if err != nil {
+			return nil, err
+		}
+		return ir.BuildSSEChunk(jsonBytes), nil
+	}
+
+	// Slow path: complex events (tool calls, finish, etc.)
 	chunk := map[string]any{
 		"id": responseID, "object": "chat.completion.chunk", "created": created, "model": model, "choices": []any{},
 	}
@@ -531,7 +576,7 @@ func ToOpenAIChunkMeta(event ir.UnifiedEvent, model, messageID string, chunkInde
 		return nil, nil
 	}
 
-	// Add logprobs to non-finish events if present (though usually only on finish or token)
+	// Add logprobs to non-finish events if present
 	if event.Logprobs != nil && event.Type != ir.EventTypeFinish {
 		choice["logprobs"] = event.Logprobs
 	}
@@ -541,12 +586,7 @@ func ToOpenAIChunkMeta(event ir.UnifiedEvent, model, messageID string, chunkInde
 	if err != nil {
 		return nil, err
 	}
-	// Use append instead of fmt.Sprintf to reduce allocations
-	result := make([]byte, 0, 6+len(jsonBytes)+2)
-	result = append(result, "data: "...)
-	result = append(result, jsonBytes...)
-	result = append(result, "\n\n"...)
-	return result, nil
+	return ir.BuildSSEChunk(jsonBytes), nil
 }
 
 func convertMessageToOpenAI(msg ir.Message) map[string]any {

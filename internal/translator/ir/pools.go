@@ -168,3 +168,60 @@ var (
 		"$schema":              "http://json-schema.org/draft-07/schema#",
 	}
 )
+
+// -----------------------------------------------------------------------------
+// SSE Chunk Pools - Optimized for streaming responses
+// -----------------------------------------------------------------------------
+
+// sseChunkPool provides reusable byte slices for SSE chunk building.
+var sseChunkPool = sync.Pool{
+	New: func() any {
+		// Typical SSE chunk: "data: {...}\n\n" - allocate 512 bytes
+		b := make([]byte, 0, 512)
+		return &b
+	},
+}
+
+// GetSSEChunkBuf retrieves a buffer for SSE chunk building.
+func GetSSEChunkBuf() []byte {
+	bp := sseChunkPool.Get().(*[]byte)
+	return (*bp)[:0]
+}
+
+// PutSSEChunkBuf returns an SSE chunk buffer to the pool.
+func PutSSEChunkBuf(b []byte) {
+	if cap(b) >= 512 && cap(b) <= 4096 {
+		bp := b[:0]
+		sseChunkPool.Put(&bp)
+	}
+}
+
+// BuildSSEChunk builds an SSE chunk with "data: " prefix efficiently.
+// Returns a pooled buffer - caller should call PutSSEChunkBuf when done.
+func BuildSSEChunk(jsonData []byte) []byte {
+	size := 6 + len(jsonData) + 2 // "data: " + json + "\n\n"
+	buf := GetSSEChunkBuf()
+	if cap(buf) < size {
+		buf = make([]byte, 0, size)
+	}
+	buf = append(buf, "data: "...)
+	buf = append(buf, jsonData...)
+	buf = append(buf, "\n\n"...)
+	return buf
+}
+
+// BuildSSEEvent builds an SSE event with event type and data.
+// Format: "event: <type>\ndata: <json>\n\n"
+func BuildSSEEvent(eventType string, jsonData []byte) []byte {
+	size := 7 + len(eventType) + 7 + len(jsonData) + 2
+	buf := GetSSEChunkBuf()
+	if cap(buf) < size {
+		buf = make([]byte, 0, size)
+	}
+	buf = append(buf, "event: "...)
+	buf = append(buf, eventType...)
+	buf = append(buf, "\ndata: "...)
+	buf = append(buf, jsonData...)
+	buf = append(buf, "\n\n"...)
+	return buf
+}

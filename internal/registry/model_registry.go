@@ -26,6 +26,8 @@ type ModelInfo struct {
 	OwnedBy string `json:"owned_by"`
 	// Type indicates the model type (e.g., "claude", "gemini", "openai")
 	Type string `json:"type"`
+	// CanonicalID is the common name used for cross-provider routing (empty = same as ID)
+	CanonicalID string `json:"canonical_id,omitempty"`
 	// DisplayName is the human-readable name for the model
 	DisplayName string `json:"display_name,omitempty"`
 	// Name is used for Gemini-style model names
@@ -82,6 +84,12 @@ type ModelRegistration struct {
 }
 
 // ModelRegistry manages the global registry of available models
+// ProviderModelMapping holds provider and its specific model ID
+type ProviderModelMapping struct {
+	Provider string
+	ModelID  string
+}
+
 type ModelRegistry struct {
 	// models maps model ID to registration information
 	models map[string]*ModelRegistration
@@ -89,6 +97,8 @@ type ModelRegistry struct {
 	clientModels map[string][]string
 	// clientProviders maps client ID to its provider identifier
 	clientProviders map[string]string
+	// canonicalIndex maps canonical ID to provider-specific model IDs
+	canonicalIndex map[string][]ProviderModelMapping
 	// mutex ensures thread-safe access to the registry
 	mutex *sync.RWMutex
 	// showProviderPrefixes controls whether to add visual provider prefixes to model IDs
@@ -106,6 +116,7 @@ func GetGlobalRegistry() *ModelRegistry {
 			models:               make(map[string]*ModelRegistration),
 			clientModels:         make(map[string][]string),
 			clientProviders:      make(map[string]string),
+			canonicalIndex:       make(map[string][]ProviderModelMapping),
 			mutex:                &sync.RWMutex{},
 			showProviderPrefixes: false,
 		}
@@ -354,7 +365,15 @@ func (r *ModelRegistry) addModelRegistration(modelID, provider string, model *Mo
 		registration.Providers = map[string]int{provider: 1}
 	}
 	r.models[providerModelKey] = registration
-	log.Debugf("Registered new model %s from provider %s", providerModelKey, provider)
+
+	// Update canonical index for cross-provider routing
+	canonicalID := model.CanonicalID
+	if canonicalID == "" {
+		canonicalID = modelID // Use modelID as canonical if not specified
+	}
+	r.addToCanonicalIndex(canonicalID, provider, modelID)
+
+	log.Debugf("Registered new model %s from provider %s (canonical: %s)", providerModelKey, provider, canonicalID)
 }
 
 func (r *ModelRegistry) removeModelRegistration(clientID, modelID, provider string, now time.Time) {
@@ -393,6 +412,81 @@ func (r *ModelRegistry) removeModelRegistration(clientID, modelID, provider stri
 		delete(r.models, providerModelKey)
 		log.Debugf("Removed model %s as no clients remain", providerModelKey)
 	}
+}
+
+// addToCanonicalIndex adds a provider-model mapping to the canonical index
+func (r *ModelRegistry) addToCanonicalIndex(canonicalID, provider, modelID string) {
+	if canonicalID == "" || provider == "" {
+		return
+	}
+	// Check if this mapping already exists
+	for _, m := range r.canonicalIndex[canonicalID] {
+		if m.Provider == provider && m.ModelID == modelID {
+			return
+		}
+	}
+	r.canonicalIndex[canonicalID] = append(r.canonicalIndex[canonicalID], ProviderModelMapping{
+		Provider: provider,
+		ModelID:  modelID,
+	})
+}
+
+// GetProvidersWithModelID returns all providers and their model IDs for a canonical/model ID
+func (r *ModelRegistry) GetProvidersWithModelID(modelID string) []ProviderModelMapping {
+	r.mutex.RLock()
+	defer r.mutex.RUnlock()
+
+	// First check canonical index
+	if mappings, ok := r.canonicalIndex[modelID]; ok && len(mappings) > 0 {
+		// Filter to only include providers with active registrations
+		result := make([]ProviderModelMapping, 0, len(mappings))
+		for _, m := range mappings {
+			key := m.Provider + ":" + m.ModelID
+			if reg, ok := r.models[key]; ok && reg != nil && reg.Count > 0 {
+				result = append(result, m)
+			}
+		}
+		if len(result) > 0 {
+			return result
+		}
+	}
+
+	// Fallback: direct model lookup (for models without canonical mapping)
+	var result []ProviderModelMapping
+	for key, reg := range r.models {
+		if reg == nil || reg.Count == 0 {
+			continue
+		}
+		// Check direct match or provider:modelID format
+		if key == modelID {
+			for provider, count := range reg.Providers {
+				if count > 0 {
+					result = append(result, ProviderModelMapping{Provider: provider, ModelID: modelID})
+				}
+			}
+		} else if idx := len(key) - len(modelID) - 1; idx > 0 && key[idx] == ':' && key[idx+1:] == modelID {
+			provider := key[:idx]
+			result = append(result, ProviderModelMapping{Provider: provider, ModelID: modelID})
+		}
+	}
+	return result
+}
+
+// GetModelIDForProvider translates a canonical model ID to provider-specific ID.
+// Returns the original modelID if no translation is found.
+func (r *ModelRegistry) GetModelIDForProvider(modelID, provider string) string {
+	r.mutex.RLock()
+	defer r.mutex.RUnlock()
+
+	// Check canonical index for translation
+	if mappings, ok := r.canonicalIndex[modelID]; ok {
+		for _, m := range mappings {
+			if m.Provider == provider {
+				return m.ModelID
+			}
+		}
+	}
+	return modelID
 }
 
 func cloneModelInfo(model *ModelInfo) *ModelInfo {

@@ -2,6 +2,7 @@
 package to_ir
 
 import (
+	"bytes"
 	"encoding/json"
 	"strings"
 
@@ -350,33 +351,50 @@ func parseResponsesAPIOutput(output gjson.Result, usage *ir.Usage) ([]ir.Message
 	return messages, usage, nil
 }
 
+// SSE prefix constants for zero-allocation comparison
+var (
+	sseEventPrefix = []byte("event:")
+	sseDataPrefix  = []byte("data:")
+	sseDone        = []byte("[DONE]")
+)
+
 // ParseOpenAIChunk parses streaming SSE chunk FROM OpenAI API into events.
 // Handles both formats:
 // - Chat Completions: "data: {...}" with choices[].delta
 // - Responses API: "event: response.xxx\ndata: {...}" with semantic event types
+// Optimized: uses bytes operations to avoid string allocations in hot path.
 func ParseOpenAIChunk(rawJSON []byte) ([]ir.UnifiedEvent, error) {
-	s := strings.TrimSpace(string(rawJSON))
+	raw := bytes.TrimSpace(rawJSON)
+	if len(raw) == 0 {
+		return nil, nil
+	}
 
-	eventType, dataStr := "", s
-	if strings.HasPrefix(s, "event:") {
-		if parts := strings.SplitN(s, "\n", 2); len(parts) >= 2 {
-			eventType = strings.TrimSpace(strings.TrimPrefix(parts[0], "event:"))
-			dataStr = strings.TrimSpace(parts[1])
+	var eventType string
+	data := raw
+
+	// Parse "event: xxx\ndata: yyy" format (Responses API)
+	if bytes.HasPrefix(raw, sseEventPrefix) {
+		if idx := bytes.IndexByte(raw, '\n'); idx > 0 {
+			eventType = string(bytes.TrimSpace(raw[6:idx])) // Skip "event:"
+			data = bytes.TrimSpace(raw[idx+1:])
 		}
 	}
-	if strings.HasPrefix(dataStr, "data:") {
-		dataStr = strings.TrimSpace(strings.TrimPrefix(dataStr, "data:"))
+
+	// Strip "data:" or "data: " prefix
+	if bytes.HasPrefix(data, sseDataPrefix) {
+		data = bytes.TrimSpace(data[5:]) // Skip "data:"
 	}
-	if dataStr == "" {
+
+	if len(data) == 0 {
 		return nil, nil
 	}
-	if dataStr == "[DONE]" {
+	if bytes.Equal(data, sseDone) {
 		return []ir.UnifiedEvent{{Type: ir.EventTypeFinish, FinishReason: ir.FinishReasonStop}}, nil
 	}
-	if !gjson.Valid(dataStr) {
+	if !gjson.ValidBytes(data) {
 		return nil, nil
 	}
-	root := gjson.Parse(dataStr)
+	root := gjson.ParseBytes(data)
 
 	if eventType == "" {
 		eventType = root.Get("type").String()

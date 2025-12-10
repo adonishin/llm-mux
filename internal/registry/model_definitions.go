@@ -23,6 +23,7 @@ func GetClaudeModels() []*ModelInfo {
 			Created:             1759104000, // 2025-09-29
 			OwnedBy:             "anthropic",
 			Type:                "claude",
+			CanonicalID:         "claude-sonnet-4-5",
 			DisplayName:         "Claude 4.5 Sonnet",
 			ContextLength:       200000,
 			MaxCompletionTokens: 64000,
@@ -88,6 +89,7 @@ func GetClaudeModels() []*ModelInfo {
 			Created:             1761955200, // 2025-11-01
 			OwnedBy:             "anthropic",
 			Type:                "claude",
+			CanonicalID:         "claude-opus-4-5",
 			DisplayName:         "Claude 4.5 Opus",
 			Description:         "Premium model combining maximum intelligence with practical performance",
 			ContextLength:       200000,
@@ -109,6 +111,7 @@ func GetClaudeModels() []*ModelInfo {
 			Created:             1715644800, // 2025-05-14
 			OwnedBy:             "anthropic",
 			Type:                "claude",
+			CanonicalID:         "claude-opus-4",
 			DisplayName:         "Claude 4 Opus",
 			ContextLength:       200000,
 			MaxCompletionTokens: 32000,
@@ -119,6 +122,7 @@ func GetClaudeModels() []*ModelInfo {
 			Created:             1715644800, // 2025-05-14
 			OwnedBy:             "anthropic",
 			Type:                "claude",
+			CanonicalID:         "claude-sonnet-4",
 			DisplayName:         "Claude 4 Sonnet",
 			ContextLength:       200000,
 			MaxCompletionTokens: 64000,
@@ -378,6 +382,7 @@ func GetGeminiCLIModels() []*ModelInfo {
 			Created:                    1759104000,
 			OwnedBy:                    "anthropic",
 			Type:                       "gemini-cli",
+			CanonicalID:                "claude-sonnet-4-5",
 			Name:                       "claude-sonnet-4-5",
 			Version:                    "4.5",
 			DisplayName:                "Claude Sonnet 4.5",
@@ -392,6 +397,7 @@ func GetGeminiCLIModels() []*ModelInfo {
 			Created:                    1759104000,
 			OwnedBy:                    "anthropic",
 			Type:                       "gemini-cli",
+			CanonicalID:                "claude-sonnet-4-5-thinking",
 			Name:                       "claude-sonnet-4-5-thinking",
 			Version:                    "4.5",
 			DisplayName:                "Claude Sonnet 4.5 Thinking",
@@ -407,6 +413,7 @@ func GetGeminiCLIModels() []*ModelInfo {
 			Created:                    1761955200,
 			OwnedBy:                    "anthropic",
 			Type:                       "gemini-cli",
+			CanonicalID:                "claude-opus-4-5-thinking",
 			Name:                       "claude-opus-4-5-thinking",
 			Version:                    "4.5",
 			DisplayName:                "Claude Opus 4.5 Thinking",
@@ -1136,22 +1143,23 @@ func GetGitHubCopilotModels() []*ModelInfo {
 func GetKiroModels() []*ModelInfo {
 	entries := []struct {
 		ID          string
+		CanonicalID string
 		DisplayName string
 		Description string
 		Created     int64
 	}{
 		// Primary models from Kiro MODEL_MAPPING
 		{ID: "claude-sonnet-4-5", DisplayName: "Claude Sonnet 4.5", Description: "Claude Sonnet 4.5 via Kiro/Amazon Q", Created: 1758672000},
-		{ID: "claude-sonnet-4-5-20250929", DisplayName: "Claude Sonnet 4.5 (20250929)", Description: "Claude Sonnet 4.5 via Kiro/Amazon Q", Created: 1758672000},
-		{ID: "claude-sonnet-4-20250514", DisplayName: "Claude Sonnet 4 (20250514)", Description: "Claude Sonnet 4 via Kiro/Amazon Q", Created: 1747267200},
+		{ID: "claude-sonnet-4-5-20250929", CanonicalID: "claude-sonnet-4-5", DisplayName: "Claude Sonnet 4.5 (20250929)", Description: "Claude Sonnet 4.5 via Kiro/Amazon Q", Created: 1758672000},
+		{ID: "claude-sonnet-4-20250514", CanonicalID: "claude-sonnet-4", DisplayName: "Claude Sonnet 4 (20250514)", Description: "Claude Sonnet 4 via Kiro/Amazon Q", Created: 1747267200},
 		{ID: "claude-3-7-sonnet-20250219", DisplayName: "Claude 3.7 Sonnet", Description: "Claude 3.7 Sonnet via Kiro/Amazon Q", Created: 1739923200},
 		// Amazon Q prefixed aliases
-		{ID: "amazonq-claude-sonnet-4-20250514", DisplayName: "Amazon Q Claude Sonnet 4", Description: "Claude Sonnet 4 via Amazon Q", Created: 1747267200},
+		{ID: "amazonq-claude-sonnet-4-20250514", CanonicalID: "claude-sonnet-4", DisplayName: "Amazon Q Claude Sonnet 4", Description: "Claude Sonnet 4 via Amazon Q", Created: 1747267200},
 		{ID: "amazonq-claude-3-7-sonnet-20250219", DisplayName: "Amazon Q Claude 3.7 Sonnet", Description: "Claude 3.7 Sonnet via Amazon Q", Created: 1739923200},
 		// Additional Claude models available via Kiro
-		{ID: "claude-4-sonnet", DisplayName: "Claude 4 Sonnet", Description: "Claude 4 Sonnet via Kiro/Amazon Q", Created: 1747267200},
-		{ID: "claude-opus-4-20250514", DisplayName: "Claude 4 Opus", Description: "Claude 4 Opus via Kiro/Amazon Q", Created: 1747267200},
-		{ID: "claude-opus-4-5-20251101", DisplayName: "Claude 4.5 Opus", Description: "Claude 4.5 Opus via Kiro/Amazon Q", Created: 1761955200},
+		{ID: "claude-4-sonnet", CanonicalID: "claude-sonnet-4", DisplayName: "Claude 4 Sonnet", Description: "Claude 4 Sonnet via Kiro/Amazon Q", Created: 1747267200},
+		{ID: "claude-opus-4-20250514", CanonicalID: "claude-opus-4", DisplayName: "Claude 4 Opus", Description: "Claude 4 Opus via Kiro/Amazon Q", Created: 1747267200},
+		{ID: "claude-opus-4-5-20251101", CanonicalID: "claude-opus-4-5", DisplayName: "Claude 4.5 Opus", Description: "Claude 4.5 Opus via Kiro/Amazon Q", Created: 1761955200},
 		{ID: "claude-3-5-sonnet-20241022", DisplayName: "Claude 3.5 Sonnet", Description: "Claude 3.5 Sonnet via Kiro/Amazon Q", Created: 1729555200},
 		{ID: "claude-3-5-haiku-20241022", DisplayName: "Claude 3.5 Haiku", Description: "Claude 3.5 Haiku via Kiro/Amazon Q", Created: 1729555200},
 	}
@@ -1163,6 +1171,7 @@ func GetKiroModels() []*ModelInfo {
 			Created:     entry.Created,
 			OwnedBy:     "kiro",
 			Type:        "kiro",
+			CanonicalID: entry.CanonicalID,
 			DisplayName: entry.DisplayName,
 			Description: entry.Description,
 		})

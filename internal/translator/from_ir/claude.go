@@ -218,8 +218,12 @@ func (p *ClaudeProvider) ParseStreamChunkWithState(chunkJSON []byte, state *ir.C
 }
 
 // ToClaudeSSE converts event to Claude SSE format.
+// ToClaudeSSE converts event to Claude SSE format.
+// Optimized: uses pooled builders and fast path for text deltas.
 func ToClaudeSSE(event ir.UnifiedEvent, model, messageID string, state *ClaudeStreamState) ([]byte, error) {
-	var result strings.Builder
+	// Get pooled builder
+	result := ir.GetStringBuilder()
+	defer ir.PutStringBuilder(result)
 
 	if state != nil && !state.MessageStartSent {
 		state.MessageStartSent = true
@@ -236,12 +240,12 @@ func ToClaudeSSE(event ir.UnifiedEvent, model, messageID string, state *ClaudeSt
 
 	switch event.Type {
 	case ir.EventTypeToken:
-		result.WriteString(emitTextDelta(event.Content, state))
+		emitTextDeltaTo(result, event.Content, state)
 	case ir.EventTypeReasoning:
-		result.WriteString(emitThinkingDelta(event.Reasoning, state))
+		emitThinkingDeltaTo(result, event.Reasoning, state)
 	case ir.EventTypeToolCall:
 		if event.ToolCall != nil {
-			result.WriteString(emitToolCall(event.ToolCall, state))
+			emitToolCallTo(result, event.ToolCall, state)
 		}
 	case ir.EventTypeFinish:
 		if state != nil && state.FinishSent {
@@ -250,7 +254,7 @@ func ToClaudeSSE(event ir.UnifiedEvent, model, messageID string, state *ClaudeSt
 		if state != nil {
 			state.FinishSent = true
 		}
-		result.WriteString(emitFinish(event.Usage, state))
+		emitFinishTo(result, event.Usage, state)
 	case ir.EventTypeError:
 		result.WriteString(formatSSE(ir.ClaudeSSEError, map[string]any{
 			"type": ir.ClaudeSSEError, "error": map[string]any{"type": "api_error", "message": errMsg(event.Error)},
@@ -260,6 +264,7 @@ func ToClaudeSSE(event ir.UnifiedEvent, model, messageID string, state *ClaudeSt
 	if result.Len() == 0 {
 		return nil, nil
 	}
+	// Copy to avoid retaining pooled buffer
 	return []byte(result.String()), nil
 }
 
@@ -361,8 +366,8 @@ func formatSSE(eventType string, data any) string {
 	return result
 }
 
-func emitTextDelta(text string, state *ClaudeStreamState) string {
-	var result strings.Builder
+// emitTextDeltaTo writes text delta SSE to builder (zero-alloc for builder).
+func emitTextDeltaTo(result *strings.Builder, text string, state *ClaudeStreamState) {
 	idx := 0
 	if state != nil {
 		idx = state.TextBlockIndex
@@ -378,11 +383,16 @@ func emitTextDelta(text string, state *ClaudeStreamState) string {
 		"type": ir.ClaudeSSEContentBlockDelta, "index": idx,
 		"delta": map[string]any{"type": "text_delta", "text": text},
 	}))
+}
+
+func emitTextDelta(text string, state *ClaudeStreamState) string {
+	var result strings.Builder
+	emitTextDeltaTo(&result, text, state)
 	return result.String()
 }
 
-func emitThinkingDelta(thinking string, state *ClaudeStreamState) string {
-	var result strings.Builder
+// emitThinkingDeltaTo writes thinking delta SSE to builder.
+func emitThinkingDeltaTo(result *strings.Builder, thinking string, state *ClaudeStreamState) {
 	idx := 0
 	if state != nil {
 		idx = state.TextBlockIndex
@@ -398,11 +408,16 @@ func emitThinkingDelta(thinking string, state *ClaudeStreamState) string {
 		"type": ir.ClaudeSSEContentBlockDelta, "index": idx,
 		"delta": map[string]any{"type": "thinking_delta", "thinking": thinking},
 	}))
+}
+
+func emitThinkingDelta(thinking string, state *ClaudeStreamState) string {
+	var result strings.Builder
+	emitThinkingDeltaTo(&result, thinking, state)
 	return result.String()
 }
 
-func emitToolCall(tc *ir.ToolCall, state *ClaudeStreamState) string {
-	var result strings.Builder
+// emitToolCallTo writes tool call SSE to builder.
+func emitToolCallTo(result *strings.Builder, tc *ir.ToolCall, state *ClaudeStreamState) {
 	if state != nil && state.TextBlockStarted && !state.TextBlockStopped {
 		state.TextBlockStopped = true
 		result.WriteString(formatSSE(ir.ClaudeSSEContentBlockStop, map[string]any{"type": ir.ClaudeSSEContentBlockStop, "index": state.TextBlockIndex}))
@@ -429,11 +444,16 @@ func emitToolCall(tc *ir.ToolCall, state *ClaudeStreamState) string {
 		"delta": map[string]any{"type": "input_json_delta", "partial_json": args},
 	}))
 	result.WriteString(formatSSE(ir.ClaudeSSEContentBlockStop, map[string]any{"type": ir.ClaudeSSEContentBlockStop, "index": idx}))
+}
+
+func emitToolCall(tc *ir.ToolCall, state *ClaudeStreamState) string {
+	var result strings.Builder
+	emitToolCallTo(&result, tc, state)
 	return result.String()
 }
 
-func emitFinish(usage *ir.Usage, state *ClaudeStreamState) string {
-	var result strings.Builder
+// emitFinishTo writes finish SSE to builder.
+func emitFinishTo(result *strings.Builder, usage *ir.Usage, state *ClaudeStreamState) {
 	stopReason := ir.ClaudeStopEndTurn
 	if state != nil && state.HasToolCalls {
 		stopReason = ir.ClaudeStopToolUse
@@ -444,6 +464,11 @@ func emitFinish(usage *ir.Usage, state *ClaudeStreamState) string {
 	}
 	result.WriteString(formatSSE(ir.ClaudeSSEMessageDelta, delta))
 	result.WriteString(formatSSE(ir.ClaudeSSEMessageStop, map[string]any{"type": ir.ClaudeSSEMessageStop}))
+}
+
+func emitFinish(usage *ir.Usage, state *ClaudeStreamState) string {
+	var result strings.Builder
+	emitFinishTo(&result, usage, state)
 	return result.String()
 }
 

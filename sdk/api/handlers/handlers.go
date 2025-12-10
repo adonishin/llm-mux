@@ -8,6 +8,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/nghyane/llm-mux/internal/interfaces"
+	"github.com/nghyane/llm-mux/internal/registry"
 	"github.com/nghyane/llm-mux/internal/util"
 	coreauth "github.com/nghyane/llm-mux/sdk/cliproxy/auth"
 	coreexecutor "github.com/nghyane/llm-mux/sdk/cliproxy/executor"
@@ -215,7 +216,13 @@ func (h *BaseAPIHandler) getRequestDetails(modelName string) (providers []string
 	} else if specifiedProvider != "" {
 		providers = []string{specifiedProvider}
 	} else {
-		providers = util.GetProviderName(normalizedModel)
+		// Try model family resolution first
+		if resolved := h.resolveModelFamily(normalizedModel); resolved != nil {
+			providers = []string{resolved.Provider}
+			normalizedModel = resolved.ModelID
+		} else {
+			providers = util.GetProviderName(normalizedModel)
+		}
 	}
 
 	if len(providers) == 0 {
@@ -233,6 +240,32 @@ func (h *BaseAPIHandler) parseDynamicModel(modelName string) (providerName, mode
 		}
 	}
 	return "", modelName, false
+}
+
+// resolveModelFamily attempts to resolve a canonical model name to a specific provider.
+// Returns nil if no family match is found or no provider is available.
+type familyResolution struct {
+	Provider string
+	ModelID  string
+}
+
+func (h *BaseAPIHandler) resolveModelFamily(modelName string) *familyResolution {
+	if !registry.IsCanonicalID(modelName) {
+		return nil
+	}
+
+	// Get all available providers from registry
+	availableProviders := registry.GetGlobalRegistry().GetAvailableProviders()
+	if len(availableProviders) == 0 {
+		return nil
+	}
+
+	provider, modelID, found := registry.ResolveModelFamily(modelName, availableProviders)
+	if !found {
+		return nil
+	}
+
+	return &familyResolution{Provider: provider, ModelID: modelID}
 }
 
 func cloneBytes(src []byte) []byte {

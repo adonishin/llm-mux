@@ -802,6 +802,31 @@ func (r *ModelRegistry) GetModelInfo(modelID string) *ModelInfo {
 	return nil
 }
 
+// GetAvailableProviders returns a list of all provider types that currently have
+// at least one model available (registered with count > 0).
+func (r *ModelRegistry) GetAvailableProviders() []string {
+	r.mutex.RLock()
+	defer r.mutex.RUnlock()
+
+	providerSet := make(map[string]bool)
+	for _, reg := range r.models {
+		if reg == nil || reg.Count == 0 {
+			continue
+		}
+		for provider, count := range reg.Providers {
+			if count > 0 {
+				providerSet[provider] = true
+			}
+		}
+	}
+
+	providers := make([]string, 0, len(providerSet))
+	for p := range providerSet {
+		providers = append(providers, p)
+	}
+	return providers
+}
+
 // formatProviderPrefix creates a visual prefix for a model based on its type.
 // ModelIDNormalizer provides centralized model ID normalization and prefix handling.
 type ModelIDNormalizer struct{}

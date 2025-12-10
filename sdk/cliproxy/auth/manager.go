@@ -1067,6 +1067,14 @@ func statusCodeFromResult(err *Error) int {
 	return err.StatusCode()
 }
 
+// isOAuthRevokedMessage checks if the error message indicates a permanently revoked OAuth token.
+func isOAuthRevokedMessage(msg string) bool {
+	return strings.Contains(msg, "invalid_grant") ||
+		strings.Contains(msg, "token expired or revoked") ||
+		strings.Contains(msg, "oauth_token_revoked") ||
+		strings.Contains(msg, "UNAUTHENTICATED")
+}
+
 func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Duration, now time.Time) {
 	if auth == nil {
 		return
@@ -1083,8 +1091,15 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 	statusCode := statusCodeFromResult(resultErr)
 	switch statusCode {
 	case 401:
-		auth.StatusMessage = "unauthorized"
-		auth.NextRetryAfter = now.Add(30 * time.Minute)
+		// Check if this is an OAuth revoked/expired error (permanent failure)
+		if resultErr != nil && isOAuthRevokedMessage(resultErr.Message) {
+			auth.StatusMessage = "oauth_token_revoked"
+			auth.Disabled = true
+			auth.Status = StatusDisabled
+		} else {
+			auth.StatusMessage = "unauthorized"
+			auth.NextRetryAfter = now.Add(30 * time.Minute)
+		}
 	case 402, 403:
 		auth.StatusMessage = "payment_required"
 		auth.NextRetryAfter = now.Add(30 * time.Minute)

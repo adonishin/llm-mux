@@ -512,6 +512,10 @@ func prepareGeminiCLITokenSource(ctx context.Context, cfg *config.Config, auth *
 	src := conf.TokenSource(ctxToken, &token)
 	currentToken, err := src.Token()
 	if err != nil {
+		// Wrap OAuth errors with proper status code for auth state handling
+		if isOAuthRevokedError(err) {
+			return nil, nil, newOAuthRevokedError(err)
+		}
 		return nil, nil, err
 	}
 	updateGeminiCLITokenMetadata(auth, base, currentToken)
@@ -744,6 +748,26 @@ func newGeminiStatusErr(statusCode int, body []byte) statusErr {
 		}
 	}
 	return err
+}
+
+// isOAuthRevokedError checks if the error is an OAuth token revoked/expired error.
+func isOAuthRevokedError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "invalid_grant") ||
+		strings.Contains(msg, "Token has been expired or revoked") ||
+		strings.Contains(msg, "token expired") ||
+		strings.Contains(msg, "token revoked")
+}
+
+// newOAuthRevokedError creates a statusErr for OAuth revoked tokens.
+func newOAuthRevokedError(err error) statusErr {
+	return statusErr{
+		code: http.StatusUnauthorized,
+		msg:  fmt.Sprintf(`{"error":{"code":401,"message":"OAuth token expired or revoked: %s","status":"UNAUTHENTICATED"}}`, err.Error()),
+	}
 }
 
 // rateLimitRetrier handles rate limit (429) errors with exponential backoff retry logic.

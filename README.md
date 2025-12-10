@@ -1,41 +1,110 @@
 # llm-mux
 
-Multi-provider LLM gateway with unified OpenAI-compatible API.
+**Free LLM API gateway** that converts OAuth-authenticated CLI tools into OpenAI-compatible endpoints.
+
+Use Claude, Gemini, GPT, and other models **without API keys** - authenticate once with your existing CLI tools.
+
+## Why llm-mux?
+
+| Traditional API Access | llm-mux |
+|------------------------|---------|
+| Requires API keys | Uses your existing CLI OAuth |
+| Pay per token | Free (within CLI quotas) |
+| One provider per key | All providers, one endpoint |
+| Different APIs per provider | Unified OpenAI-compatible API |
+
+## Quick Start
+
+```bash
+# Install
+brew tap nghyane/tap && brew install llm-mux
+
+# Authenticate (one-time)
+llm-mux --login              # Gemini
+llm-mux --claude-login       # Claude
+llm-mux --copilot-login      # GitHub Copilot
+
+# Start
+brew services start llm-mux
+
+# Use
+curl http://localhost:8318/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model": "gemini-2.5-flash", "messages": [{"role": "user", "content": "Hello!"}]}'
+```
+
+## Supported Providers
+
+| Provider | Auth | Key Models |
+|----------|------|------------|
+| **Gemini CLI** | OAuth | gemini-2.5-pro, gemini-2.5-flash, gemini-3-pro-preview |
+| **AI Studio** | OAuth | gemini-2.5-pro, gemini-*-image |
+| **Antigravity** | OAuth | gemini-claude-sonnet-4-5, gemini-claude-opus-4-5-thinking |
+| **Claude** | OAuth | claude-sonnet-4-5, claude-opus-4-5 |
+| **OpenAI Codex** | OAuth | gpt-5.1, gpt-5.1-codex, gpt-5.1-codex-max |
+| **GitHub Copilot** | OAuth | gpt-4.1, gpt-4o, gpt-5-mini, gpt-5.1-codex-max |
+| **Kiro** | OAuth | claude-sonnet-4-5, claude-opus-4-5 (via Amazon Q) |
+| **iFlow** | OAuth | qwen3-coder-plus, deepseek-r1, kimi-k2 |
+| **Vertex AI** | API Key | Gemini models |
+
+## Features
+
+### Unified API
+All providers accessible through OpenAI-compatible endpoints:
+```
+POST /v1/chat/completions     # OpenAI Chat API
+POST /v1/completions          # Completions API
+GET  /v1/models               # List available models
+POST /v1beta/models/*         # Gemini-native API
+POST /api/chat                # Ollama-compatible
+```
+
+### IR-based Translation
+Hub-and-spoke architecture minimizes code duplication:
+
+```
+    Clients                        Providers
+    ───────                        ─────────
+    OpenAI ────┐                ┌──── Gemini CLI
+    Claude ────┤                ├──── AI Studio
+    Ollama ────┼─── Unified ────┼──── Claude
+    Gemini ────┤       IR       ├──── Codex
+    Kiro   ────┘                └──── Copilot
+```
+
+Instead of n² format converters, each provider implements just 2 translations (to/from IR).
+
+### Smart Tool Call Normalization
+Automatically fixes parameter naming mismatches between models and clients:
+- `filePath` ↔ `file_path` (case conversion)
+- `path` → `target_file` (semantic synonyms)
+- Array → scalar extraction when schema expects single value
+
+### Dynamic Model Registry
+- Reference counting tracks available OAuth sessions
+- Auto-hides models when quota exceeded
+- Graceful recovery when quota refreshes
 
 ## Installation
 
-### Homebrew (macOS/Linux)
-
+### Homebrew
 ```bash
 brew tap nghyane/tap
 brew install llm-mux
-
-# Start as service
 brew services start llm-mux
 ```
 
 ### Docker
-
 ```bash
 docker pull nghyane/llm-mux
-docker run -p 8318:8318 -v ./config.yaml:/llm-mux/config.yaml nghyane/llm-mux
+docker run -p 8318:8318 -v ~/.config/llm-mux:/root/.config/llm-mux nghyane/llm-mux
 ```
 
-### Build from source
-
+### From Source
 ```bash
 go build -o llm-mux ./cmd/server/
 ./llm-mux -config config.yaml
 ```
-
-## Features
-
-- **Multi-provider support** - Gemini, Claude, OpenAI, Vertex AI, and more
-- **Unified API** - OpenAI-compatible endpoints for all providers
-- **OAuth authentication** - Gemini CLI, AI Studio, Antigravity, Claude, Codex
-- **IR-based translation** - Canonical intermediate representation for clean format conversion
-- **Load balancing** - Intelligent provider selection with performance tracking
-- **Streaming** - SSE and NDJSON streaming support
 
 ## Configuration
 
@@ -44,65 +113,30 @@ port: 8318
 auth-dir: "~/.config/llm-mux/auth"
 use-canonical-translator: true
 
-# API keys (optional - can also use OAuth)
+# Optional API keys for non-OAuth providers
 api-keys:
-  - "your-api-key"
+  - "your-vertex-api-key"
 ```
-
-## Supported Providers
-
-| Provider | Auth Method | Models |
-|----------|-------------|--------|
-| Gemini CLI | OAuth | gemini-2.5-pro, gemini-2.5-flash, gemini-2.5-flash-lite, gemini-3-pro-preview |
-| AI Studio | OAuth | gemini-2.5-pro, gemini-2.5-flash, gemini-2.5-flash-lite, gemini-3-pro-preview, gemini-*-image |
-| Antigravity | OAuth | gemini-claude-sonnet-4-5, gemini-claude-sonnet-4-5-thinking, gemini-claude-opus-4-5-thinking, + Gemini models |
-| Claude | OAuth | claude-sonnet-4-5, claude-opus-4-5, claude-3-7-sonnet |
-| Codex | OAuth | gpt-5.1, gpt-5.1-codex, gpt-5.1-codex-max |
-| Kiro | OAuth | claude-sonnet-4-5, claude-opus-4-5 (via Amazon Q) |
-| GitHub Copilot | OAuth | gpt-4.1, gpt-4o, gpt-5-mini, gpt-5.1-codex-max |
-| iFlow | OAuth | qwen3-coder-plus, deepseek-r1, kimi-k2, and more |
-| Vertex AI | API Key | Gemini models |
-| OpenAI Compatible | API Key | Any OpenAI-compatible API |
-
-## API Endpoints
-
-```
-POST /v1/chat/completions              # OpenAI Chat API
-POST /v1/completions                   # OpenAI Completions API
-GET  /v1/models                        # List available models
-POST /v1beta/models/{model}:generate   # Gemini API
-POST /api/chat                         # Ollama-compatible API
-```
-
-## Architecture
-
-```
-    OpenAI ─────┐                       ┌───── Gemini CLI
-    Claude ─────┤                       ├───── AI Studio
-    Ollama ─────┼─────► Canonical ◄─────┼───── Antigravity
-    Gemini ─────┤       IR              ├───── Claude
-      Kiro ─────┤                       ├───── Codex
-     Cline ─────┘                       └───── Vertex
-```
-
-**Hub-and-spoke design** - All formats convert through unified IR, minimizing code duplication.
 
 ## Authentication
 
+Each provider uses its own OAuth flow:
+
 ```bash
-# OAuth login for providers
-llm-mux --login              # Gemini CLI
+llm-mux --login              # Gemini CLI (Google account)
 llm-mux --antigravity-login  # Antigravity (Claude via Google)
-llm-mux --claude-login       # Claude
-llm-mux --codex-login        # OpenAI Codex
-llm-mux --kiro-login         # Kiro (Amazon Q)
-llm-mux --copilot-login      # GitHub Copilot
-llm-mux --qwen-login         # Qwen
+llm-mux --claude-login       # Claude (Anthropic account)
+llm-mux --codex-login        # OpenAI Codex (OpenAI account)
+llm-mux --copilot-login      # GitHub Copilot (GitHub account)
+llm-mux --kiro-login         # Kiro (Amazon Q/AWS account)
+llm-mux --qwen-login         # Qwen (Alibaba account)
 llm-mux --iflow-login        # iFlow
 llm-mux --cline-login        # Cline
 ```
 
-## SDK Usage
+Tokens are stored in `~/.config/llm-mux/auth/` and auto-refresh.
+
+## SDK
 
 ```go
 import "github.com/nghyane/llm-mux/sdk/cliproxy"
@@ -113,6 +147,14 @@ svc, _ := cliproxy.NewBuilder().
 
 svc.Run(ctx)
 ```
+
+## How It Works
+
+1. **OAuth Capture**: llm-mux performs the same OAuth flow as official CLI tools
+2. **Token Management**: Stores and auto-refreshes tokens
+3. **Request Translation**: Converts incoming OpenAI-format requests to provider-native format via IR
+4. **Response Translation**: Converts provider responses back to OpenAI format
+5. **Load Balancing**: Routes to available OAuth sessions, handles quota limits
 
 ## License
 

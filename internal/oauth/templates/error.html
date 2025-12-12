@@ -1,0 +1,25 @@
+{{template "base" .}}
+
+{{define "title"}}Authentication Failed{{end}}
+
+{{define "head"}}
+<style>
+    body {
+        background: linear-gradient(135deg, #ff6b6b 0%, #ee5a5a 100%);
+    }
+</style>
+{{end}}
+
+{{define "content"}}
+<svg class="icon icon-error" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+    <circle cx="12" cy="12" r="10"/>
+    <path d="M15 9l-6 6M9 9l6 6"/>
+</svg>
+<h1 class="error">Authentication Failed</h1>
+<p>An error occurred during authentication.</p>
+{{if .Message}}
+<div class="error-box" role="alert">{{.Message}}</div>
+{{end}}
+<p class="muted">Please close this window and try again.</p>
+<span class="sr-only" role="alert">Authentication failed. {{.Message}}</span>
+{{end}}

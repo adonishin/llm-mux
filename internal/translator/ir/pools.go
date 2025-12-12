@@ -154,6 +154,13 @@ var (
 	EmptyStringMap = map[string]string{}
 )
 
+// JSON Schema version constants
+// Claude API requires JSON Schema draft 2020-12
+// See: https://docs.anthropic.com/en/docs/build-with-claude/tool-use
+const (
+	JSONSchemaDraft202012 = "https://json-schema.org/draft/2020-12/schema"
+)
+
 // Common JSON schema fragments (immutable, safe to share)
 var (
 	EmptyObjectSchema = map[string]any{
@@ -165,7 +172,7 @@ var (
 		"type":                 "object",
 		"properties":           map[string]any{},
 		"additionalProperties": false,
-		"$schema":              "http://json-schema.org/draft-07/schema#",
+		"$schema":              JSONSchemaDraft202012,
 	}
 )
 

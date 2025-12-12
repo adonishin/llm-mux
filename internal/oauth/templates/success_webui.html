@@ -1,0 +1,44 @@
+{{template "base" .}}
+
+{{define "title"}}Authentication Successful{{end}}
+
+{{define "content"}}
+<svg class="icon icon-success" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+    <circle cx="12" cy="12" r="10"/>
+    <path d="M9 12l2 2 4-4"/>
+</svg>
+<h1 class="success">Authentication Successful!</h1>
+<p>Redirecting back to application...</p>
+<p class="muted">
+    <span class="countdown">
+        <span class="spinner" aria-hidden="true"></span>
+        <span>This window will close automatically.</span>
+    </span>
+</p>
+<span class="sr-only" role="status">Authentication completed. Returning to application.</span>
+{{end}}
+
+{{define "scripts"}}
+<script>
+(function() {
+    try {
+        var result = {
+            type: 'oauth-callback',
+            provider: '{{.Provider}}',
+            state: '{{.State}}',
+            status: 'success',
+            error: ''
+        };
+        if (window.opener) {
+            window.opener.postMessage(result, '*');
+        }
+        if (window.parent && window.parent !== window) {
+            window.parent.postMessage(result, '*');
+        }
+    } catch (e) {
+        console.error('postMessage failed:', e);
+    }
+    setTimeout(function() { window.close(); }, 2000);
+})();
+</script>
+{{end}}

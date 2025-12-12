@@ -423,36 +423,6 @@ func GetGeminiCLIModels() []*ModelInfo {
 			SupportedGenerationMethods: []string{"generateContent"},
 			Thinking:                   &ThinkingSupport{Min: 1024, Max: 100000, ZeroAllowed: false, DynamicAllowed: true},
 		},
-		// Computer use model
-		{
-			ID:                         "gemini-2.5-computer-use-preview-10-2025",
-			Object:                     "model",
-			Created:                    1762300800,
-			OwnedBy:                    "google",
-			Type:                       "antigravity",
-			Name:                       "models/gemini-2.5-computer-use-preview-10-2025",
-			Version:                    "2.5",
-			DisplayName:                "Gemini 2.5 Computer Use Preview",
-			Description:                "Gemini 2.5 with computer use capabilities",
-			InputTokenLimit:            1048576,
-			OutputTokenLimit:           65536,
-			SupportedGenerationMethods: []string{"generateContent"},
-		},
-		// GPT-OSS via Antigravity
-		{
-			ID:                         "gpt-oss-120b-medium",
-			Object:                     "model",
-			Created:                    1762300800,
-			OwnedBy:                    "openai",
-			Type:                       "antigravity",
-			Name:                       "gpt-oss-120b-medium",
-			Version:                    "1.0",
-			DisplayName:                "GPT-OSS 120B Medium",
-			Description:                "GPT-OSS 120B via Google Cloud Code API",
-			InputTokenLimit:            128000,
-			OutputTokenLimit:           32000,
-			SupportedGenerationMethods: []string{"generateContent"},
-		},
 	}
 }
 

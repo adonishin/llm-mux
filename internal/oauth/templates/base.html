@@ -1,0 +1,168 @@
+{{define "base"}}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="color-scheme" content="light dark">
+    <title>{{block "title" .}}Authentication{{end}}</title>
+    <style>
+        *, *::before, *::after { box-sizing: border-box; }
+
+        :root {
+            --bg-gradient-start: #667eea;
+            --bg-gradient-end: #764ba2;
+            --card-bg: #ffffff;
+            --text-primary: #1f2937;
+            --text-secondary: #6b7280;
+            --text-muted: #9ca3af;
+            --success-color: #22c55e;
+            --error-color: #ef4444;
+            --error-bg: #fef2f2;
+            --error-text: #b91c1c;
+            --shadow: 0 10px 40px rgba(0,0,0,0.2);
+        }
+
+        @media (prefers-color-scheme: dark) {
+            :root {
+                --card-bg: #1f2937;
+                --text-primary: #f9fafb;
+                --text-secondary: #d1d5db;
+                --text-muted: #9ca3af;
+                --error-bg: #451a1a;
+                --error-text: #fca5a5;
+                --shadow: 0 10px 40px rgba(0,0,0,0.5);
+            }
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            margin: 0;
+            padding: 16px;
+            background: linear-gradient(135deg, var(--bg-gradient-start) 0%, var(--bg-gradient-end) 100%);
+        }
+
+        .card {
+            text-align: center;
+            background: var(--card-bg);
+            padding: 48px 56px;
+            border-radius: 20px;
+            box-shadow: var(--shadow);
+            max-width: 420px;
+            width: 100%;
+            animation: slideUp 0.4s ease-out;
+        }
+
+        @keyframes slideUp {
+            from { opacity: 0; transform: translateY(20px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        @keyframes scaleIn {
+            from { opacity: 0; transform: scale(0.8); }
+            to { opacity: 1; transform: scale(1); }
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.6; }
+        }
+
+        @media (prefers-reduced-motion: reduce) {
+            .card, .icon { animation: none; }
+        }
+
+        .icon {
+            width: 72px;
+            height: 72px;
+            margin: 0 auto 20px;
+            animation: scaleIn 0.3s ease-out 0.2s both;
+        }
+
+        .icon-success { color: var(--success-color); }
+        .icon-error { color: var(--error-color); }
+
+        h1 {
+            color: var(--text-primary);
+            font-size: 1.5rem;
+            font-weight: 600;
+            margin: 0 0 12px;
+        }
+
+        h1.success { color: var(--success-color); }
+        h1.error { color: var(--error-color); }
+
+        p {
+            color: var(--text-secondary);
+            margin: 8px 0;
+            font-size: 1rem;
+            line-height: 1.5;
+        }
+
+        .muted {
+            color: var(--text-muted);
+            font-size: 0.875rem;
+            margin-top: 16px;
+        }
+
+        .error-box {
+            background: var(--error-bg);
+            color: var(--error-text);
+            padding: 12px 20px;
+            border-radius: 10px;
+            margin-top: 16px;
+            font-size: 0.875rem;
+            word-break: break-word;
+        }
+
+        .countdown {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            animation: pulse 1.5s ease-in-out infinite;
+        }
+
+        .spinner {
+            width: 14px;
+            height: 14px;
+            border: 2px solid var(--text-muted);
+            border-top-color: transparent;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        .sr-only {
+            position: absolute;
+            width: 1px;
+            height: 1px;
+            padding: 0;
+            margin: -1px;
+            overflow: hidden;
+            clip: rect(0, 0, 0, 0);
+            white-space: nowrap;
+            border: 0;
+        }
+
+        @media (max-width: 480px) {
+            .card { padding: 32px 24px; }
+            h1 { font-size: 1.25rem; }
+        }
+    </style>
+    {{block "head" .}}{{end}}
+</head>
+<body>
+    <main class="card" role="main">
+        {{block "content" .}}{{end}}
+    </main>
+    {{block "scripts" .}}{{end}}
+</body>
+</html>
+{{end}}

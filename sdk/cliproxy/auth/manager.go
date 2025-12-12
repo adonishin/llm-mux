@@ -388,6 +388,7 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 // wrapStreamForStats wraps a stream channel to record stats when complete.
 // Uses a buffered channel and non-blocking sends to prevent goroutine leaks
 // when consumers stop reading.
+// Context cancellation (user disconnect) is not counted as provider failure.
 func (m *Manager) wrapStreamForStats(ctx context.Context, in <-chan cliproxyexecutor.StreamChunk, provider, model string, start time.Time) <-chan cliproxyexecutor.StreamChunk {
 	out := make(chan cliproxyexecutor.StreamChunk, 1)
 	go func() {
@@ -396,8 +397,7 @@ func (m *Manager) wrapStreamForStats(ctx context.Context, in <-chan cliproxyexec
 		for {
 			select {
 			case <-ctx.Done():
-				// Context cancelled - record as error and exit
-				m.recordProviderResult(provider, model, false, time.Since(start))
+				// Context cancelled by client - don't count as provider failure
 				return
 			case chunk, ok := <-in:
 				if !ok {
@@ -412,7 +412,7 @@ func (m *Manager) wrapStreamForStats(ctx context.Context, in <-chan cliproxyexec
 				select {
 				case out <- chunk:
 				case <-ctx.Done():
-					m.recordProviderResult(provider, model, false, time.Since(start))
+					// Context cancelled by client - don't count as provider failure
 					return
 				}
 			}
@@ -556,10 +556,8 @@ func (m *Manager) executeStreamWithProvider(ctx context.Context, provider string
 			for {
 				select {
 				case <-streamCtx.Done():
-					// Context cancelled - mark as failed and exit to prevent goroutine leak
-					if !failed {
-						m.MarkResult(streamCtx, Result{AuthID: streamAuth.ID, Provider: streamProvider, Model: req.Model, Success: false, Error: &Error{Message: "context cancelled"}})
-					}
+					// Context cancelled by client - don't count as provider failure
+					// This prevents penalizing providers when users disconnect
 					return
 				case chunk, ok := <-streamChunks:
 					if !ok {
@@ -720,9 +718,6 @@ func (m *Manager) shouldRetryAfterError(err error, attempt, maxAttempts int, pro
 	if err == nil || attempt >= maxAttempts-1 {
 		return 0, false
 	}
-	if maxWait <= 0 {
-		return 0, false
-	}
 
 	// Get error category - don't retry user errors or permanent auth failures
 	category := categoryFromError(err)
@@ -733,9 +728,16 @@ func (m *Manager) shouldRetryAfterError(err error, attempt, maxAttempts int, pro
 	if status := statusCodeFromError(err); status == http.StatusOK {
 		return 0, false
 	}
+
+	// Check if there's a cooldown wait needed
 	wait, found := m.closestCooldownWait(providers, model)
-	if !found || wait > maxWait {
+	if found && wait > maxWait {
+		// Cooldown exists but exceeds max wait - don't retry
 		return 0, false
+	}
+	if !found {
+		// No cooldown needed - retry immediately with next provider
+		return 0, true
 	}
 	return wait, true
 }

@@ -521,7 +521,7 @@ func CleanJsonSchemaForClaude(schema map[string]any) map[string]any {
 	schema = CleanJsonSchema(schema)
 	cleanSchemaForClaudeRecursive(schema)
 	schema["additionalProperties"] = false
-	schema["$schema"] = "http://json-schema.org/draft-07/schema#"
+	schema["$schema"] = JSONSchemaDraft202012
 
 	// Cache the result
 	if cacheKey != "" {

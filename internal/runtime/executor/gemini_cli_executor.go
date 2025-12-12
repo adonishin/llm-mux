@@ -13,6 +13,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/nghyane/llm-mux/internal/config"
+	"github.com/nghyane/llm-mux/internal/oauth"
 	"github.com/nghyane/llm-mux/internal/misc"
 	"github.com/nghyane/llm-mux/internal/runtime/geminicli"
 	"github.com/nghyane/llm-mux/internal/translator/from_ir"
@@ -483,8 +484,8 @@ func prepareGeminiCLITokenSource(ctx context.Context, cfg *config.Config, auth *
 	}
 
 	conf := &oauth2.Config{
-		ClientID:     geminiOauthClientID,
-		ClientSecret: geminiOauthClientSecret,
+		ClientID:     oauth.GeminiClientID,
+		ClientSecret: oauth.GeminiClientSecret,
 		Scopes:       geminiOauthScopes,
 		Endpoint:     google.Endpoint,
 	}
@@ -785,11 +786,26 @@ func (r *rateLimitRetrier) calculateDelay(errorBody []byte) time.Duration {
 
 // parseRetryDelay extracts the retry delay from a Google API 429 error response.
 // The error response contains a RetryInfo.retryDelay field in the format "0.847655010s".
+// Handles both formats:
+//   - Object: {"error": {"details": [...]}}
+//   - Array:  [{"error": {"details": [...]}}]
+//
 // Returns the parsed duration or an error if it cannot be determined.
 func parseRetryDelay(errorBody []byte) (*time.Duration, error) {
-	// Try to parse the retryDelay from the error response
-	// Format: error.details[].retryDelay where @type == "type.googleapis.com/google.rpc.RetryInfo"
-	details := gjson.GetBytes(errorBody, "error.details")
+	// Try multiple paths to handle different response formats
+	paths := []string{
+		"error.details",   // Standard: {"error": {"details": [...]}}
+		"0.error.details", // Array wrapped: [{"error": {"details": [...]}}]
+	}
+
+	var details gjson.Result
+	for _, path := range paths {
+		details = gjson.GetBytes(errorBody, path)
+		if details.Exists() && details.IsArray() {
+			break
+		}
+	}
+
 	if !details.Exists() || !details.IsArray() {
 		return nil, fmt.Errorf("no error.details found")
 	}
@@ -802,7 +818,7 @@ func parseRetryDelay(errorBody []byte) (*time.Duration, error) {
 				// Parse duration string like "0.847655010s"
 				duration, err := time.ParseDuration(retryDelay)
 				if err != nil {
-					return nil, fmt.Errorf("failed to parse duration")
+					return nil, fmt.Errorf("failed to parse duration: %w", err)
 				}
 				return &duration, nil
 			}

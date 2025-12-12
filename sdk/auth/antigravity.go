@@ -14,14 +14,13 @@ import (
 	"github.com/nghyane/llm-mux/internal/browser"
 	"github.com/nghyane/llm-mux/internal/config"
 	"github.com/nghyane/llm-mux/internal/misc"
+	"github.com/nghyane/llm-mux/internal/oauth"
 	"github.com/nghyane/llm-mux/internal/util"
 	coreauth "github.com/nghyane/llm-mux/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 )
 
 const (
-	antigravityClientID     = "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com"
-	antigravityClientSecret = "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"
 	antigravityCallbackPort = 51121
 )
 
@@ -226,8 +225,8 @@ type antigravityTokenResponse struct {
 func exchangeAntigravityCode(ctx context.Context, code, redirectURI string, httpClient *http.Client) (*antigravityTokenResponse, error) {
 	data := url.Values{}
 	data.Set("code", code)
-	data.Set("client_id", antigravityClientID)
-	data.Set("client_secret", antigravityClientSecret)
+	data.Set("client_id", oauth.AntigravityClientID)
+	data.Set("client_secret", oauth.AntigravityClientSecret)
 	data.Set("redirect_uri", redirectURI)
 	data.Set("grant_type", "authorization_code")
 
@@ -294,7 +293,7 @@ func fetchAntigravityUserInfo(ctx context.Context, accessToken string, httpClien
 func buildAntigravityAuthURL(redirectURI, state string) string {
 	params := url.Values{}
 	params.Set("access_type", "offline")
-	params.Set("client_id", antigravityClientID)
+	params.Set("client_id", oauth.AntigravityClientID)
 	params.Set("prompt", "consent")
 	params.Set("redirect_uri", redirectURI)
 	params.Set("response_type", "code")

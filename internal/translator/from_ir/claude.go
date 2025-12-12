@@ -135,7 +135,7 @@ func (p *ClaudeProvider) ConvertRequest(req *ir.UnifiedChatRequest) ([]byte, err
 				tool["input_schema"] = ir.CleanJsonSchemaForClaude(copyMap(t.Parameters))
 			} else {
 				tool["input_schema"] = map[string]any{
-					"type": "object", "properties": map[string]any{}, "additionalProperties": false, "$schema": "http://json-schema.org/draft-07/schema#",
+					"type": "object", "properties": map[string]any{}, "additionalProperties": false, "$schema": ir.JSONSchemaDraft202012,
 				}
 			}
 			tools = append(tools, tool)

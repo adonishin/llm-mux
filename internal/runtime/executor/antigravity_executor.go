@@ -15,6 +15,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/nghyane/llm-mux/internal/config"
+	"github.com/nghyane/llm-mux/internal/oauth"
 	"github.com/nghyane/llm-mux/internal/registry"
 	"github.com/nghyane/llm-mux/internal/translator/ir"
 	cliproxyauth "github.com/nghyane/llm-mux/sdk/cliproxy/auth"
@@ -29,15 +30,14 @@ import (
 // The "antigravity" format is used for upstream communication with the Google Cloud Code API.
 
 const (
-	antigravityBaseURLDaily    = "https://daily-cloudcode-pa.sandbox.googleapis.com"
-	antigravityBaseURLAutopush = "https://autopush-cloudcode-pa.sandbox.googleapis.com"
-	antigravityBaseURLProd     = "https://cloudcode-pa.googleapis.com"
-	antigravityStreamPath      = "/v1internal:streamGenerateContent"
-	antigravityGeneratePath    = "/v1internal:generateContent"
-	antigravityModelsPath      = "/v1internal:fetchAvailableModels"
-	defaultAntigravityAgent    = "antigravity/1.11.5 windows/amd64"
-	antigravityAuthType        = "antigravity"
-	refreshSkew                = 3000 * time.Second
+	antigravityBaseURLDaily = "https://daily-cloudcode-pa.sandbox.googleapis.com"
+	antigravityBaseURLProd  = "https://cloudcode-pa.googleapis.com"
+	antigravityStreamPath   = "/v1internal:streamGenerateContent"
+	antigravityGeneratePath = "/v1internal:generateContent"
+	antigravityModelsPath   = "/v1internal:fetchAvailableModels"
+	defaultAntigravityAgent = "antigravity/1.11.5 windows/amd64"
+	antigravityAuthType     = "antigravity"
+	refreshSkew             = 3000 * time.Second
 )
 
 // Note: We use crypto/rand via uuid package for thread-safe random generation
@@ -502,8 +502,8 @@ func (e *AntigravityExecutor) refreshToken(ctx context.Context, auth *cliproxyau
 	}
 
 	form := url.Values{}
-	form.Set("client_id", antigravityClientID)
-	form.Set("client_secret", antigravityClientSecret)
+	form.Set("client_id", oauth.AntigravityClientID)
+	form.Set("client_secret", oauth.AntigravityClientSecret)
 	form.Set("grant_type", "refresh_token")
 	form.Set("refresh_token", refreshToken)
 
@@ -694,7 +694,7 @@ func buildBaseURL(auth *cliproxyauth.Auth) string {
 	if baseURLs := antigravityBaseURLFallbackOrder(auth); len(baseURLs) > 0 {
 		return baseURLs[0]
 	}
-	return antigravityBaseURLAutopush
+	return antigravityBaseURLDaily
 }
 
 func resolveHost(base string) string {
@@ -728,12 +728,11 @@ func antigravityBaseURLFallbackOrder(auth *cliproxyauth.Auth) []string {
 	if base := resolveCustomAntigravityBaseURL(auth); base != "" {
 		return []string{base}
 	}
-	// Production endpoint first for better compatibility with standard GCP projects
-	// Staging/sandbox endpoints require special API enablement
+	// Daily endpoint first (matches original CLIProxyAPI behavior)
+	// Production endpoint as fallback
 	return []string{
-		antigravityBaseURLProd,
 		antigravityBaseURLDaily,
-		antigravityBaseURLAutopush,
+		antigravityBaseURLProd,
 	}
 }
 
@@ -776,7 +775,9 @@ func geminiToAntigravity(modelName string, payload []byte, projectID string) []b
 	if projectID != "" {
 		root["project"] = projectID
 	} else {
-		root["project"] = generateProjectID()
+		generatedID := generateProjectID()
+		log.Debugf("antigravity: using generated project ID (legacy fallback) - project_id not in auth metadata")
+		root["project"] = generatedID
 	}
 	root["requestId"] = generateRequestID()
 
@@ -804,26 +805,38 @@ func geminiToAntigravity(modelName string, payload []byte, projectID string) []b
 		}
 	}
 
-	// Clean tools for Claude models
-	if strings.Contains(modelName, "claude") {
-		if tools, ok := request["tools"].([]any); ok {
-			for _, tool := range tools {
-				if tm, ok := tool.(map[string]any); ok {
-					if fds, ok := tm["functionDeclarations"].([]any); ok {
-						for _, fd := range fds {
-							if fdm, ok := fd.(map[string]any); ok {
-								var schema map[string]any
-								if s, ok := fdm["parametersJsonSchema"].(map[string]any); ok {
-									schema = s
-								} else if s, ok := fdm["parameters"].(map[string]any); ok {
-									schema = s
+	// Ensure all function parameters have type "object" (Gemini requirement)
+	if tools, ok := request["tools"].([]any); ok {
+		for _, tool := range tools {
+			if tm, ok := tool.(map[string]any); ok {
+				if fds, ok := tm["functionDeclarations"].([]any); ok {
+					for _, fd := range fds {
+						if fdm, ok := fd.(map[string]any); ok {
+							var schema map[string]any
+							if s, ok := fdm["parametersJsonSchema"].(map[string]any); ok {
+								schema = s
+							} else if s, ok := fdm["parameters"].(map[string]any); ok {
+								schema = s
+							}
+							if schema != nil {
+								// Gemini requires parameters to have type "object"
+								if schema["type"] == nil {
+									schema["type"] = "object"
 								}
-								if schema != nil {
+								if schema["properties"] == nil {
+									schema["properties"] = map[string]any{}
+								}
+								// Claude-specific cleaning - keep $schema for Claude Vertex API validation
+								// Gemini models don't accept $schema field, so we only add it for Claude
+								if strings.Contains(modelName, "claude") {
 									ir.CleanJsonSchemaForClaude(schema)
-									delete(schema, "$schema") // Must be after CleanJsonSchemaForClaude which adds $schema
-									fdm["parameters"] = schema
-									delete(fdm, "parametersJsonSchema")
+									// $schema is kept for Claude (added by CleanJsonSchemaForClaude)
+								} else {
+									// Remove $schema for non-Claude models (Gemini rejects it)
+									delete(schema, "$schema")
 								}
+								fdm["parameters"] = schema
+								delete(fdm, "parametersJsonSchema")
 							}
 						}
 					}
@@ -850,13 +863,17 @@ func generateSessionID() string {
 	return "-" + uuidStr[:8] + uuidStr[9:13] + uuidStr[14:18]
 }
 
+// projectIDAdjectives and projectIDNouns are used for generating random project IDs (legacy fallback).
+var (
+	projectIDAdjectives = []string{"useful", "bright", "swift", "calm", "bold"}
+	projectIDNouns      = []string{"fuze", "wave", "spark", "flow", "core"}
+)
+
 func generateProjectID() string {
-	adjectives := []string{"useful", "bright", "swift", "calm", "bold"}
-	nouns := []string{"fuze", "wave", "spark", "flow", "core"}
 	// Use uuid bytes for thread-safe random selection
 	uuidBytes := []byte(uuid.NewString())
-	adj := adjectives[int(uuidBytes[0])%len(adjectives)]
-	noun := nouns[int(uuidBytes[1])%len(nouns)]
+	adj := projectIDAdjectives[int(uuidBytes[0])%len(projectIDAdjectives)]
+	noun := projectIDNouns[int(uuidBytes[1])%len(projectIDNouns)]
 	randomPart := strings.ToLower(uuid.NewString())[:5]
 	return adj + "-" + noun + "-" + randomPart
 }

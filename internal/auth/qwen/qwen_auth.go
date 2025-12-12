@@ -225,8 +225,8 @@ func (qa *QwenAuth) InitiateDeviceFlow(ctx context.Context) (*DeviceFlow, error)
 
 // PollForToken polls the token endpoint with the device code to obtain an access token.
 func (qa *QwenAuth) PollForToken(deviceCode, codeVerifier string) (*QwenTokenData, error) {
-	pollInterval := 5 * time.Second
-	maxAttempts := 60 // 5 minutes max
+	pollInterval := 2 * time.Second // Qwen official SDK uses 2 seconds
+	maxAttempts := 150              // 5 minutes max (150 * 2s = 300s)
 
 	for attempt := 0; attempt < maxAttempts; attempt++ {
 		data := url.Values{}

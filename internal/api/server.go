@@ -7,6 +7,7 @@ package api
 import (
 	"context"
 	"crypto/subtle"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -26,6 +27,7 @@ import (
 	"github.com/nghyane/llm-mux/internal/config"
 	"github.com/nghyane/llm-mux/internal/logging"
 	"github.com/nghyane/llm-mux/internal/managementasset"
+	"github.com/nghyane/llm-mux/internal/oauth"
 	"github.com/nghyane/llm-mux/internal/registry"
 	"github.com/nghyane/llm-mux/internal/usage"
 	"github.com/nghyane/llm-mux/internal/util"
@@ -39,8 +41,6 @@ import (
 	log "github.com/sirupsen/logrus"
 	"gopkg.in/yaml.v3"
 )
-
-const oauthCallbackSuccessHTML = `<html><head><meta charset="utf-8"><title>Authentication successful</title><script>setTimeout(function(){window.close();},5000);</script></head><body><h1>Authentication successful!</h1><p>You can close this window.</p><p>This window will close automatically in 5 seconds.</p></body></html>`
 
 type serverOptionConfig struct {
 	extraMiddleware      []gin.HandlerFunc
@@ -383,66 +383,33 @@ func (s *Server) setupRoutes() {
 	// OAuth callback endpoints (reuse main server port)
 	// These endpoints receive provider redirects and persist
 	// the short-lived code/state for the waiting goroutine.
-	s.engine.GET("/anthropic/callback", func(c *gin.Context) {
-		code := c.Query("code")
-		state := c.Query("state")
-		errStr := c.Query("error")
-		// Persist to a temporary file keyed by state
-		if state != "" {
-			file := fmt.Sprintf("%s/.oauth-anthropic-%s.oauth", s.cfg.AuthDir, state)
-			_ = os.WriteFile(file, []byte(fmt.Sprintf(`{"code":"%s","state":"%s","error":"%s"}`, code, state, errStr)), 0o600)
+	// Uses unified oauth package for HTML generation and file persistence.
+	oauthCallbackHandler := func(provider string) gin.HandlerFunc {
+		return func(c *gin.Context) {
+			code := c.Query("code")
+			state := c.Query("state")
+			errStr := c.Query("error")
+			// Persist to a temporary file keyed by state
+			if state != "" {
+				file := fmt.Sprintf("%s/.oauth-%s-%s.oauth", s.cfg.AuthDir, provider, state)
+				payload := map[string]string{"code": code, "state": state, "error": errStr}
+				data, _ := json.Marshal(payload)
+				_ = os.WriteFile(file, data, 0o600)
+			}
+			c.Header("Content-Type", "text/html; charset=utf-8")
+			if errStr != "" {
+				c.String(http.StatusOK, oauth.HTMLError(errStr))
+			} else {
+				c.String(http.StatusOK, oauth.HTMLSuccess())
+			}
 		}
-		c.Header("Content-Type", "text/html; charset=utf-8")
-		c.String(http.StatusOK, oauthCallbackSuccessHTML)
-	})
+	}
 
-	s.engine.GET("/codex/callback", func(c *gin.Context) {
-		code := c.Query("code")
-		state := c.Query("state")
-		errStr := c.Query("error")
-		if state != "" {
-			file := fmt.Sprintf("%s/.oauth-codex-%s.oauth", s.cfg.AuthDir, state)
-			_ = os.WriteFile(file, []byte(fmt.Sprintf(`{"code":"%s","state":"%s","error":"%s"}`, code, state, errStr)), 0o600)
-		}
-		c.Header("Content-Type", "text/html; charset=utf-8")
-		c.String(http.StatusOK, oauthCallbackSuccessHTML)
-	})
-
-	s.engine.GET("/google/callback", func(c *gin.Context) {
-		code := c.Query("code")
-		state := c.Query("state")
-		errStr := c.Query("error")
-		if state != "" {
-			file := fmt.Sprintf("%s/.oauth-gemini-%s.oauth", s.cfg.AuthDir, state)
-			_ = os.WriteFile(file, []byte(fmt.Sprintf(`{"code":"%s","state":"%s","error":"%s"}`, code, state, errStr)), 0o600)
-		}
-		c.Header("Content-Type", "text/html; charset=utf-8")
-		c.String(http.StatusOK, oauthCallbackSuccessHTML)
-	})
-
-	s.engine.GET("/iflow/callback", func(c *gin.Context) {
-		code := c.Query("code")
-		state := c.Query("state")
-		errStr := c.Query("error")
-		if state != "" {
-			file := fmt.Sprintf("%s/.oauth-iflow-%s.oauth", s.cfg.AuthDir, state)
-			_ = os.WriteFile(file, []byte(fmt.Sprintf(`{"code":"%s","state":"%s","error":"%s"}`, code, state, errStr)), 0o600)
-		}
-		c.Header("Content-Type", "text/html; charset=utf-8")
-		c.String(http.StatusOK, oauthCallbackSuccessHTML)
-	})
-
-	s.engine.GET("/antigravity/callback", func(c *gin.Context) {
-		code := c.Query("code")
-		state := c.Query("state")
-		errStr := c.Query("error")
-		if state != "" {
-			file := fmt.Sprintf("%s/.oauth-antigravity-%s.oauth", s.cfg.AuthDir, state)
-			_ = os.WriteFile(file, []byte(fmt.Sprintf(`{"code":"%s","state":"%s","error":"%s"}`, code, state, errStr)), 0o600)
-		}
-		c.Header("Content-Type", "text/html; charset=utf-8")
-		c.String(http.StatusOK, oauthCallbackSuccessHTML)
-	})
+	s.engine.GET("/anthropic/callback", oauthCallbackHandler("anthropic"))
+	s.engine.GET("/codex/callback", oauthCallbackHandler("codex"))
+	s.engine.GET("/google/callback", oauthCallbackHandler("gemini"))
+	s.engine.GET("/iflow/callback", oauthCallbackHandler("iflow"))
+	s.engine.GET("/antigravity/callback", oauthCallbackHandler("antigravity"))
 
 	// Management routes are registered lazily by registerManagementRoutes when a secret is configured.
 }
@@ -582,14 +549,10 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.DELETE("/auth-files", s.mgmt.DeleteAuthFile)
 		mgmt.POST("/vertex/import", s.mgmt.ImportVertexCredential)
 
-		mgmt.GET("/anthropic-auth-url", s.mgmt.RequestAnthropicToken)
-		mgmt.GET("/codex-auth-url", s.mgmt.RequestCodexToken)
-		mgmt.GET("/gemini-cli-auth-url", s.mgmt.RequestGeminiCLIToken)
-		mgmt.GET("/antigravity-auth-url", s.mgmt.RequestAntigravityToken)
-		mgmt.GET("/qwen-auth-url", s.mgmt.RequestQwenToken)
-		mgmt.GET("/iflow-auth-url", s.mgmt.RequestIFlowToken)
-		mgmt.POST("/iflow-auth-url", s.mgmt.RequestIFlowCookieToken)
-		mgmt.GET("/get-auth-status", s.mgmt.GetAuthStatus)
+		// Unified OAuth API endpoints
+		mgmt.POST("/oauth/start", s.mgmt.OAuthStart)
+		mgmt.GET("/oauth/status/:state", s.mgmt.OAuthStatus)
+		mgmt.POST("/oauth/cancel/:state", s.mgmt.OAuthCancel)
 	}
 }
 

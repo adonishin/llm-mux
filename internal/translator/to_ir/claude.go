@@ -113,12 +113,13 @@ func ParseClaudeRequest(rawJSON []byte) (*ir.UnifiedChatRequest, error) {
 		if thinking.Get("type").String() == "enabled" {
 			req.Thinking = &ir.ThinkingConfig{IncludeThoughts: true}
 			if budget := thinking.Get("budget_tokens"); budget.Exists() {
-				req.Thinking.Budget = int(budget.Int())
-			} else {
-				req.Thinking.Budget = -1 // Auto
+				b := int32(budget.Int())
+				req.Thinking.ThinkingBudget = &b
 			}
+			// Note: -1 for auto is not needed with pointer - nil means auto
 		} else if thinking.Get("type").String() == "disabled" {
-			req.Thinking = &ir.ThinkingConfig{IncludeThoughts: false, Budget: 0}
+			zero := int32(0)
+			req.Thinking = &ir.ThinkingConfig{IncludeThoughts: false, ThinkingBudget: &zero}
 		}
 	}
 
@@ -142,6 +143,17 @@ func parseClaudeMessage(m gjson.Result) ir.Message {
 
 	msg := ir.Message{Role: role}
 	content := m.Get("content")
+
+	// Parse cache_control if present
+	if cc := m.Get("cache_control"); cc.Exists() && cc.IsObject() {
+		msg.CacheControl = &ir.CacheControl{
+			Type: cc.Get("type").String(),
+		}
+		if ttl := cc.Get("ttl"); ttl.Exists() {
+			ttlVal := ttl.Int()
+			msg.CacheControl.TTL = &ttlVal
+		}
+	}
 
 	if content.Type == gjson.String {
 		msg.Content = append(msg.Content, ir.ContentPart{Type: ir.ContentTypeText, Text: content.String()})

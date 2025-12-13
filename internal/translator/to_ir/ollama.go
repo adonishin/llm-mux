@@ -171,9 +171,9 @@ func parseOllamaUsage(root gjson.Result) *ir.Usage {
 		return nil
 	}
 	return &ir.Usage{
-		PromptTokens:     int(p),
-		CompletionTokens: int(c),
-		TotalTokens:      int(p + c),
+		PromptTokens:     p,
+		CompletionTokens: c,
+		TotalTokens:      p + c,
 	}
 }
 

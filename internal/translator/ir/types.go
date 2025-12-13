@@ -37,6 +37,7 @@ const (
 
 type FinishReason string
 
+// Unified/normalized finish reasons (used in IR)
 const (
 	FinishReasonStop          FinishReason = "stop"
 	FinishReasonLength        FinishReason = "length"
@@ -44,6 +45,63 @@ const (
 	FinishReasonContentFilter FinishReason = "content_filter"
 	FinishReasonError         FinishReason = "error"
 	FinishReasonUnknown       FinishReason = "unknown"
+	FinishReasonMaxTokens     FinishReason = "max_tokens"
+	FinishReasonStopSequence  FinishReason = "stop_sequence"
+	FinishReasonEndTurn       FinishReason = "end_turn"
+)
+
+// ThinkingLevel represents the level of thinking tokens for thinking models.
+// Matches Google Gen AI SDK ThinkingLevel type.
+type ThinkingLevel string
+
+const (
+	ThinkingLevelUnspecified ThinkingLevel = "THINKING_LEVEL_UNSPECIFIED"
+	ThinkingLevelLow         ThinkingLevel = "LOW"
+	ThinkingLevelMedium      ThinkingLevel = "MEDIUM"
+	ThinkingLevelHigh        ThinkingLevel = "HIGH"
+)
+
+// ReasoningEffort represents the effort level for reasoning/thinking modes.
+type ReasoningEffort string
+
+const (
+	ReasoningEffortNone    ReasoningEffort = "none"
+	ReasoningEffortMinimal ReasoningEffort = "minimal"
+	ReasoningEffortLow     ReasoningEffort = "low"
+	ReasoningEffortMedium  ReasoningEffort = "medium"
+	ReasoningEffortHigh    ReasoningEffort = "high"
+	ReasoningEffortXHigh   ReasoningEffort = "xhigh"
+)
+
+// ServiceTier represents the service tier for API requests.
+type ServiceTier string
+
+const (
+	ServiceTierAuto     ServiceTier = "auto"
+	ServiceTierDefault  ServiceTier = "default"
+	ServiceTierFlex     ServiceTier = "flex"
+	ServiceTierScale    ServiceTier = "scale"
+	ServiceTierPriority ServiceTier = "priority"
+)
+
+// Language represents the programming language for code execution.
+// Matches Google Gen AI SDK Language type.
+type Language string
+
+const (
+	LanguageUnspecified Language = "LANGUAGE_UNSPECIFIED"
+	LanguagePython      Language = "PYTHON"
+)
+
+// Outcome represents the outcome of code execution.
+// Matches Google Gen AI SDK Outcome type.
+type Outcome string
+
+const (
+	OutcomeUnspecified       Outcome = "OUTCOME_UNSPECIFIED"
+	OutcomeOK                Outcome = "OUTCOME_OK"
+	OutcomeFailed            Outcome = "OUTCOME_FAILED"
+	OutcomeDeadlineExceeded  Outcome = "OUTCOME_DEADLINE_EXCEEDED"
 )
 
 type UnifiedEvent struct {
@@ -51,7 +109,7 @@ type UnifiedEvent struct {
 	Content           string
 	Reasoning         string
 	ReasoningSummary  string
-	ThoughtSignature  string
+	ThoughtSignature  []byte // Opaque signature for thought reuse (matches SDK []byte)
 	ToolCall          *ToolCall
 	ToolCallIndex     int
 	Image             *ImagePart
@@ -67,14 +125,30 @@ type UnifiedEvent struct {
 }
 
 type Usage struct {
-	PromptTokens             int
-	CompletionTokens         int
-	TotalTokens              int
-	ThoughtsTokenCount       int // Reasoning/thinking token count (for completion_tokens_details)
-	CachedTokens             int // Cached input tokens (Responses API prompt caching)
-	AudioTokens              int // Audio input tokens
-	AcceptedPredictionTokens int // Accepted prediction tokens
-	RejectedPredictionTokens int // Rejected prediction tokens
+	PromptTokens             int64
+	CompletionTokens         int64
+	TotalTokens              int64
+	ThoughtsTokenCount       int32
+	CachedTokens             int64
+	AudioTokens              int64
+	AcceptedPredictionTokens int64
+	RejectedPredictionTokens int64
+	CacheCreationInputTokens int64
+	CacheReadInputTokens     int64
+	PromptTokensDetails      *PromptTokensDetails
+	CompletionTokensDetails  *CompletionTokensDetails
+}
+
+type PromptTokensDetails struct {
+	CachedTokens int64
+	AudioTokens  int64
+}
+
+type CompletionTokensDetails struct {
+	ReasoningTokens          int64
+	AudioTokens              int64
+	AcceptedPredictionTokens int64
+	RejectedPredictionTokens int64
 }
 
 // OpenAIMeta contains metadata from upstream response for passthrough.
@@ -84,7 +158,7 @@ type OpenAIMeta struct {
 	ResponseID         string
 	CreateTime         int64
 	NativeFinishReason string
-	ThoughtsTokenCount int
+	ThoughtsTokenCount int32 // Matches SDK int32
 	Logprobs           any
 	GroundingMetadata  *GroundingMetadata // Google Search grounding metadata
 }
@@ -106,7 +180,7 @@ type ToolCall struct {
 	Name             string
 	Args             string
 	PartialArgs      string
-	ThoughtSignature string
+	ThoughtSignature []byte // Opaque signature for thought reuse (matches SDK []byte)
 }
 
 type Role string
@@ -136,7 +210,7 @@ type ContentPart struct {
 	Type             ContentType
 	Text             string
 	Reasoning        string
-	ThoughtSignature string
+	ThoughtSignature []byte // Opaque signature for thought reuse (matches SDK []byte)
 	Image            *ImagePart
 	File             *FilePart
 	ToolResult       *ToolResultPart
@@ -165,29 +239,42 @@ type ToolResultPart struct {
 }
 
 // CodeExecutionPart represents Gemini code execution content.
+// Language and Outcome use SDK enum types.
 type CodeExecutionPart struct {
-	Language string
+	Language Language // Programming language (matches SDK Language enum)
 	Code     string
-	Outcome  string
+	Outcome  Outcome // Execution outcome (matches SDK Outcome enum)
 	Output   string
 }
 
 // GroundingMetadata contains search grounding information from Gemini.
+// Matches Google Gen AI SDK GroundingMetadata structure.
 type GroundingMetadata struct {
-	SearchEntryPoint  *SearchEntryPoint  `json:"searchEntryPoint,omitempty"`
-	GroundingChunks   []GroundingChunk   `json:"groundingChunks,omitempty"`
-	GroundingSupports []GroundingSupport `json:"groundingSupports,omitempty"`
-	WebSearchQueries  []string           `json:"webSearchQueries,omitempty"`
+	SearchEntryPoint   *SearchEntryPoint   `json:"searchEntryPoint,omitempty"`
+	GroundingChunks    []*GroundingChunk   `json:"groundingChunks,omitempty"`   // Pointer slice per SDK
+	GroundingSupports  []*GroundingSupport `json:"groundingSupports,omitempty"` // Pointer slice per SDK
+	WebSearchQueries   []string            `json:"webSearchQueries,omitempty"`
+	RetrievalQueries   []string            `json:"retrievalQueries,omitempty"`   // SDK field
+	RetrievalMetadata  *RetrievalMetadata  `json:"retrievalMetadata,omitempty"`  // SDK field
 }
 
-// SearchEntryPoint contains the rendered search entry point HTML.
+// SearchEntryPoint contains the rendered search entry point.
+// Matches Google Gen AI SDK SearchEntryPoint structure.
 type SearchEntryPoint struct {
 	RenderedContent string `json:"renderedContent,omitempty"`
+	SDKBlob         []byte `json:"sdkBlob,omitempty"` // Binary blob per SDK
+}
+
+// RetrievalMetadata contains metadata about retrieval operations.
+type RetrievalMetadata struct {
+	GoogleSearchDynamicRetrievalScore float64 `json:"googleSearchDynamicRetrievalScore,omitempty"`
 }
 
 // GroundingChunk represents a single grounding source.
+// Matches Google Gen AI SDK GroundingChunk structure.
 type GroundingChunk struct {
-	Web *WebGrounding `json:"web,omitempty"`
+	Web              *WebGrounding              `json:"web,omitempty"`
+	RetrievedContext *RetrievedContextGrounding `json:"retrievedContext,omitempty"` // SDK field
 }
 
 // WebGrounding contains web source information.
@@ -197,23 +284,69 @@ type WebGrounding struct {
 	Domain string `json:"domain,omitempty"`
 }
 
+// RetrievedContextGrounding contains retrieval context information.
+type RetrievedContextGrounding struct {
+	URI   string `json:"uri,omitempty"`
+	Title string `json:"title,omitempty"`
+}
+
 // GroundingSupport links response segments to grounding sources.
+// Matches Google Gen AI SDK GroundingSupport structure.
 type GroundingSupport struct {
 	Segment               *GroundingSegment `json:"segment,omitempty"`
-	GroundingChunkIndices []int             `json:"groundingChunkIndices,omitempty"`
+	GroundingChunkIndices []int32           `json:"groundingChunkIndices,omitempty"` // int32 per SDK
+	ConfidenceScores      []float32         `json:"confidenceScores,omitempty"`      // SDK field
 }
 
 // GroundingSegment identifies a portion of the response text.
+// Matches Google Gen AI SDK Segment structure.
 type GroundingSegment struct {
-	StartIndex int    `json:"startIndex,omitempty"`
-	EndIndex   int    `json:"endIndex,omitempty"`
+	StartIndex int32  `json:"startIndex,omitempty"` // int32 per SDK
+	EndIndex   int32  `json:"endIndex,omitempty"`   // int32 per SDK
+	PartIndex  int32  `json:"partIndex,omitempty"`  // SDK field
 	Text       string `json:"text,omitempty"`
 }
 
+// CitationMetadata contains citation information for generated content.
+// Matches Google Gen AI SDK CitationMetadata structure.
+type CitationMetadata struct {
+	Citations []*Citation `json:"citations,omitempty"`
+}
+
+// Citation represents a single citation source.
+type Citation struct {
+	StartIndex      int32  `json:"startIndex,omitempty"`
+	EndIndex        int32  `json:"endIndex,omitempty"`
+	URI             string `json:"uri,omitempty"`
+	Title           string `json:"title,omitempty"`
+	License         string `json:"license,omitempty"`
+	PublicationDate string `json:"publicationDate,omitempty"` // ISO date string
+}
+
+// URLContextMetadata contains URL context information.
+// Matches Google Gen AI SDK URLContextMetadata structure.
+type URLContextMetadata struct {
+	URLMetadata []*URLMetadata `json:"urlMetadata,omitempty"`
+}
+
+// URLMetadata contains metadata about a URL.
+type URLMetadata struct {
+	RetrievedURL string `json:"retrievedUrl,omitempty"`
+	URLCategory  string `json:"urlCategory,omitempty"`
+}
+
+// CacheControl specifies caching behavior for request content.
+type CacheControl struct {
+	Type string
+	TTL  *int64
+}
+
 type Message struct {
-	Role      Role
-	Content   []ContentPart
-	ToolCalls []ToolCall
+	Role         Role
+	Content      []ContentPart
+	ToolCalls    []ToolCall
+	CacheControl *CacheControl
+	Refusal      string
 }
 
 // ToolDefinition represents a tool capability exposed to the model.
@@ -243,6 +376,7 @@ type UnifiedChatRequest struct {
 	ImageConfig      *ImageConfig    // Image generation configuration
 	ResponseModality []string        // Response modalities (e.g., ["TEXT", "IMAGE"])
 	Metadata         map[string]any  // Additional provider-specific metadata
+	ServiceTier      ServiceTier
 
 	// Responses API specific fields
 	Instructions       string // System instructions (Responses API)
@@ -266,11 +400,13 @@ type FunctionCallingConfig struct {
 }
 
 // ThinkingConfig controls the reasoning capabilities of the model.
+// Matches Google Gen AI SDK ThinkingConfig structure.
 type ThinkingConfig struct {
-	IncludeThoughts bool
-	Budget          int
-	Summary         string // Reasoning summary mode: "auto", "concise", "detailed" (Responses API)
-	Effort          string // Reasoning effort: "none", "low", "medium", "high" (Responses API)
+	IncludeThoughts bool           // Whether to include thoughts in response
+	ThinkingBudget  *int32         // Budget in tokens (pointer per SDK)
+	ThinkingLevel   ThinkingLevel  // Level of thinking (SDK enum)
+	Summary         string         // Reasoning summary mode: "auto", "concise", "detailed"
+	Effort          ReasoningEffort // Reasoning effort level
 }
 
 // SafetySetting represents content safety filtering configuration.

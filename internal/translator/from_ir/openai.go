@@ -52,7 +52,11 @@ func convertToChatCompletionsRequest(req *ir.UnifiedChatRequest) ([]byte, error)
 		m["stop"] = req.StopSequences
 	}
 	if req.Thinking != nil && req.Thinking.IncludeThoughts {
-		m["reasoning_effort"] = ir.MapBudgetToEffort(req.Thinking.Budget, "auto")
+		budget := 0
+		if req.Thinking.ThinkingBudget != nil {
+			budget = int(*req.Thinking.ThinkingBudget)
+		}
+		m["reasoning_effort"] = ir.MapBudgetToEffort(budget, "auto")
 	}
 
 	var messages []any
@@ -115,6 +119,11 @@ func convertToChatCompletionsRequest(req *ir.UnifiedChatRequest) ([]byte, error)
 		}
 	}
 
+	// Add service_tier if present (OpenAI-specific)
+	if req.ServiceTier != "" {
+		m["service_tier"] = string(req.ServiceTier)
+	}
+
 	return json.Marshal(m)
 }
 
@@ -154,7 +163,11 @@ func convertToResponsesAPIRequest(req *ir.UnifiedChatRequest) ([]byte, error) {
 		if req.Thinking.Effort != "" {
 			reasoning["effort"] = req.Thinking.Effort
 		} else if req.Thinking.IncludeThoughts {
-			reasoning["effort"] = ir.MapBudgetToEffort(req.Thinking.Budget, "low")
+			budget := 0
+			if req.Thinking.ThinkingBudget != nil {
+				budget = int(*req.Thinking.ThinkingBudget)
+			}
+			reasoning["effort"] = ir.MapBudgetToEffort(budget, "low")
 		}
 		if req.Thinking.Summary != "" {
 			reasoning["summary"] = req.Thinking.Summary
@@ -346,7 +359,7 @@ func ToOpenAIChatCompletionCandidates(candidates []ir.CandidateResult, usage *ir
 		usageMap := map[string]any{
 			"prompt_tokens": usage.PromptTokens, "completion_tokens": usage.CompletionTokens, "total_tokens": usage.TotalTokens,
 		}
-		thoughtsTokens := 0
+		var thoughtsTokens int32
 		if meta != nil && meta.ThoughtsTokenCount > 0 {
 			thoughtsTokens = meta.ThoughtsTokenCount
 		} else if usage.ThoughtsTokenCount > 0 {
@@ -419,14 +432,21 @@ func ToOpenAIChatCompletionMeta(messages []ir.Message, usage *ir.Usage, model, m
 	}
 
 	if usageMap := builder.BuildUsageMap(); usageMap != nil {
-		thoughtsTokens := 0
+		// Merge reasoning tokens into completion_tokens_details if not already present
+		var thoughtsTokens int32
 		if meta != nil && meta.ThoughtsTokenCount > 0 {
 			thoughtsTokens = meta.ThoughtsTokenCount
 		} else if usage != nil && usage.ThoughtsTokenCount > 0 {
 			thoughtsTokens = usage.ThoughtsTokenCount
 		}
 		if thoughtsTokens > 0 {
-			usageMap["completion_tokens_details"] = map[string]any{"reasoning_tokens": thoughtsTokens}
+			if completionDetails, ok := usageMap["completion_tokens_details"].(map[string]any); ok {
+				if _, hasReasoningTokens := completionDetails["reasoning_tokens"]; !hasReasoningTokens {
+					completionDetails["reasoning_tokens"] = thoughtsTokens
+				}
+			} else if thoughtsTokens > 0 {
+				usageMap["completion_tokens_details"] = map[string]any{"reasoning_tokens": thoughtsTokens}
+			}
 		}
 		response["usage"] = usageMap
 	}
@@ -520,7 +540,7 @@ func ToOpenAIChunkMeta(event ir.UnifiedEvent, model, messageID string, chunkInde
 		}
 		choice["delta"] = delta
 	case ir.EventTypeReasoning:
-		choice["delta"] = ir.BuildReasoningDelta(event.Reasoning, event.ThoughtSignature)
+		choice["delta"] = ir.BuildReasoningDelta(event.Reasoning, string(event.ThoughtSignature))
 	case ir.EventTypeToolCall:
 		if event.ToolCall != nil {
 			choice["delta"] = map[string]any{
@@ -565,32 +585,63 @@ func ToOpenAIChunkMeta(event ir.UnifiedEvent, model, messageID string, chunkInde
 			}
 
 			promptDetails := map[string]any{}
-			if event.Usage.CachedTokens > 0 {
-				promptDetails["cached_tokens"] = event.Usage.CachedTokens
-			}
-			if event.Usage.AudioTokens > 0 {
-				promptDetails["audio_tokens"] = event.Usage.AudioTokens
+			// Use structured PromptTokensDetails if available
+			if event.Usage.PromptTokensDetails != nil {
+				if event.Usage.PromptTokensDetails.CachedTokens > 0 {
+					promptDetails["cached_tokens"] = event.Usage.PromptTokensDetails.CachedTokens
+				}
+				if event.Usage.PromptTokensDetails.AudioTokens > 0 {
+					promptDetails["audio_tokens"] = event.Usage.PromptTokensDetails.AudioTokens
+				}
+			} else {
+				// Fall back to flat fields for backward compatibility
+				if event.Usage.CachedTokens > 0 {
+					promptDetails["cached_tokens"] = event.Usage.CachedTokens
+				}
+				if event.Usage.AudioTokens > 0 {
+					promptDetails["audio_tokens"] = event.Usage.AudioTokens
+				}
 			}
 			if len(promptDetails) > 0 {
 				usageMap["prompt_tokens_details"] = promptDetails
 			}
 
 			completionDetails := map[string]any{}
-			thoughtsTokens := 0
+			// Use structured CompletionTokensDetails if available
+			if event.Usage.CompletionTokensDetails != nil {
+				if event.Usage.CompletionTokensDetails.ReasoningTokens > 0 {
+					completionDetails["reasoning_tokens"] = event.Usage.CompletionTokensDetails.ReasoningTokens
+				}
+				if event.Usage.CompletionTokensDetails.AudioTokens > 0 {
+					completionDetails["audio_tokens"] = event.Usage.CompletionTokensDetails.AudioTokens
+				}
+				if event.Usage.CompletionTokensDetails.AcceptedPredictionTokens > 0 {
+					completionDetails["accepted_prediction_tokens"] = event.Usage.CompletionTokensDetails.AcceptedPredictionTokens
+				}
+				if event.Usage.CompletionTokensDetails.RejectedPredictionTokens > 0 {
+					completionDetails["rejected_prediction_tokens"] = event.Usage.CompletionTokensDetails.RejectedPredictionTokens
+				}
+			}
+
+			// Also handle reasoning tokens from meta and flat fields
+			var thoughtsTokens int32
 			if meta != nil && meta.ThoughtsTokenCount > 0 {
 				thoughtsTokens = meta.ThoughtsTokenCount
 			} else if event.Usage.ThoughtsTokenCount > 0 {
 				thoughtsTokens = event.Usage.ThoughtsTokenCount
 			}
-			if thoughtsTokens > 0 {
+			if thoughtsTokens > 0 && completionDetails["reasoning_tokens"] == nil {
 				completionDetails["reasoning_tokens"] = thoughtsTokens
 			}
-			if event.Usage.AcceptedPredictionTokens > 0 {
+
+			// Backward compatibility: add flat fields if they exist but aren't in details
+			if event.Usage.AcceptedPredictionTokens > 0 && completionDetails["accepted_prediction_tokens"] == nil {
 				completionDetails["accepted_prediction_tokens"] = event.Usage.AcceptedPredictionTokens
 			}
-			if event.Usage.RejectedPredictionTokens > 0 {
+			if event.Usage.RejectedPredictionTokens > 0 && completionDetails["rejected_prediction_tokens"] == nil {
 				completionDetails["rejected_prediction_tokens"] = event.Usage.RejectedPredictionTokens
 			}
+
 			if len(completionDetails) > 0 {
 				usageMap["completion_tokens_details"] = completionDetails
 			}
@@ -621,19 +672,30 @@ func ToOpenAIChunkMeta(event ir.UnifiedEvent, model, messageID string, chunkInde
 }
 
 func convertMessageToOpenAI(msg ir.Message) map[string]any {
+	var result map[string]any
 	switch msg.Role {
 	case ir.RoleSystem:
 		if text := ir.CombineTextParts(msg); text != "" {
-			return map[string]any{"role": "system", "content": text}
+			result = map[string]any{"role": "system", "content": text}
 		}
 	case ir.RoleUser:
-		return buildOpenAIUserMessage(msg)
+		result = buildOpenAIUserMessage(msg)
 	case ir.RoleAssistant:
-		return buildOpenAIAssistantMessage(msg)
+		result = buildOpenAIAssistantMessage(msg)
 	case ir.RoleTool:
-		return buildOpenAIToolMessage(msg)
+		result = buildOpenAIToolMessage(msg)
 	}
-	return nil
+
+	// Add cache_control if present
+	if result != nil && msg.CacheControl != nil {
+		cacheCtrl := map[string]any{"type": msg.CacheControl.Type}
+		if msg.CacheControl.TTL != nil {
+			cacheCtrl["ttl"] = *msg.CacheControl.TTL
+		}
+		result["cache_control"] = cacheCtrl
+	}
+
+	return result
 }
 
 func buildOpenAIUserMessage(msg ir.Message) map[string]any {
@@ -685,6 +747,10 @@ func buildOpenAIAssistantMessage(msg ir.Message) map[string]any {
 			}
 		}
 		result["tool_calls"] = tcs
+	}
+	// Include refusal message if model declined to respond
+	if msg.Refusal != "" {
+		result["refusal"] = msg.Refusal
 	}
 	return result
 }
@@ -760,7 +826,7 @@ func ToResponsesAPIResponse(messages []ir.Message, usage *ir.Usage, model string
 		if usage != nil && usage.CachedTokens > 0 {
 			responsesUsage["input_tokens_details"] = map[string]any{"cached_tokens": usage.CachedTokens}
 		}
-		thoughtsTokens := 0
+		var thoughtsTokens int32
 		if meta != nil && meta.ThoughtsTokenCount > 0 {
 			thoughtsTokens = meta.ThoughtsTokenCount
 		} else if usage != nil && usage.ThoughtsTokenCount > 0 {

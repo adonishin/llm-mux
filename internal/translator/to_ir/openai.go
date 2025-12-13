@@ -177,6 +177,11 @@ func ParseOpenAIRequest(rawJSON []byte) (*ir.UnifiedChatRequest, error) {
 		req.Metadata[ir.MetaOpenAIUser] = v.String()
 	}
 
+	// Parse service_tier if present (OpenAI-specific)
+	if v := root.Get("service_tier"); v.Exists() && v.String() != "" {
+		req.ServiceTier = ir.ServiceTier(v.String())
+	}
+
 	return req, nil
 }
 
@@ -313,10 +318,14 @@ func ParseOpenAIResponse(rawJSON []byte) ([]ir.Message, *ir.Usage, error) {
 
 	rf := ir.ParseReasoningFromJSON(message)
 	if rf.Text != "" {
+		var sig []byte
+		if rf.Signature != "" {
+			sig = []byte(rf.Signature)
+		}
 		msg.Content = append(msg.Content, ir.ContentPart{
 			Type:             ir.ContentTypeReasoning,
 			Reasoning:        rf.Text,
-			ThoughtSignature: rf.Signature,
+			ThoughtSignature: sig,
 		})
 	}
 	if content := message.Get("content"); content.Exists() && content.String() != "" {
@@ -324,7 +333,12 @@ func ParseOpenAIResponse(rawJSON []byte) ([]ir.Message, *ir.Usage, error) {
 	}
 	msg.ToolCalls = append(msg.ToolCalls, ir.ParseOpenAIStyleToolCalls(message.Get("tool_calls").Array())...)
 
-	if len(msg.Content) == 0 && len(msg.ToolCalls) == 0 {
+	// Parse refusal message if model declined to respond
+	if refusal := message.Get("refusal").String(); refusal != "" {
+		msg.Refusal = refusal
+	}
+
+	if len(msg.Content) == 0 && len(msg.ToolCalls) == 0 && msg.Refusal == "" {
 		return nil, usage, nil
 	}
 	return []ir.Message{msg}, usage, nil
@@ -341,7 +355,11 @@ func parseResponsesAPIOutput(output gjson.Result, usage *ir.Usage) ([]ir.Message
 					msg.Content = append(msg.Content, ir.ContentPart{Type: ir.ContentTypeText, Text: c.Get("text").String()})
 				}
 			}
-			if len(msg.Content) > 0 {
+			// Parse refusal if present in message output
+			if refusal := item.Get("refusal").String(); refusal != "" {
+				msg.Refusal = refusal
+			}
+			if len(msg.Content) > 0 || msg.Refusal != "" {
 				messages = append(messages, msg)
 			}
 		case "reasoning":
@@ -423,22 +441,22 @@ func ParseOpenAIChunk(rawJSON []byte) ([]ir.UnifiedEvent, error) {
 	if !choice.Exists() {
 		if u := root.Get("usage"); u.Exists() {
 			usage := &ir.Usage{
-				PromptTokens: int(u.Get("prompt_tokens").Int()), CompletionTokens: int(u.Get("completion_tokens").Int()), TotalTokens: int(u.Get("total_tokens").Int()),
+				PromptTokens: u.Get("prompt_tokens").Int(), CompletionTokens: u.Get("completion_tokens").Int(), TotalTokens: u.Get("total_tokens").Int(),
 			}
 			if v := u.Get("prompt_tokens_details.cached_tokens"); v.Exists() {
-				usage.CachedTokens = int(v.Int())
+				usage.CachedTokens = v.Int()
 			}
 			if v := u.Get("prompt_tokens_details.audio_tokens"); v.Exists() {
-				usage.AudioTokens = int(v.Int())
+				usage.AudioTokens = v.Int()
 			}
 			if v := u.Get("completion_tokens_details.reasoning_tokens"); v.Exists() {
-				usage.ThoughtsTokenCount = int(v.Int())
+				usage.ThoughtsTokenCount = int32(v.Int())
 			}
 			if v := u.Get("completion_tokens_details.accepted_prediction_tokens"); v.Exists() {
-				usage.AcceptedPredictionTokens = int(v.Int())
+				usage.AcceptedPredictionTokens = v.Int()
 			}
 			if v := u.Get("completion_tokens_details.rejected_prediction_tokens"); v.Exists() {
-				usage.RejectedPredictionTokens = int(v.Int())
+				usage.RejectedPredictionTokens = v.Int()
 			}
 
 			events = append(events, ir.UnifiedEvent{
@@ -458,10 +476,14 @@ func ParseOpenAIChunk(rawJSON []byte) ([]ir.UnifiedEvent, error) {
 		events = append(events, ir.UnifiedEvent{Type: ir.EventTypeToken, Refusal: refusal.String()})
 	}
 	if rf := ir.ParseReasoningFromJSON(delta); rf.Text != "" {
+		var sig []byte
+		if rf.Signature != "" {
+			sig = []byte(rf.Signature)
+		}
 		events = append(events, ir.UnifiedEvent{
 			Type:             ir.EventTypeReasoning,
 			Reasoning:        rf.Text,
-			ThoughtSignature: rf.Signature,
+			ThoughtSignature: sig,
 		})
 	}
 	for _, tc := range delta.Get("tool_calls").Array() {
@@ -529,13 +551,13 @@ func parseResponsesStreamEvent(eventType string, root gjson.Result) ([]ir.Unifie
 		event := ir.UnifiedEvent{Type: ir.EventTypeFinish, FinishReason: ir.FinishReasonStop}
 		if u := root.Get("response.usage"); u.Exists() {
 			event.Usage = &ir.Usage{
-				PromptTokens: int(u.Get("input_tokens").Int()), CompletionTokens: int(u.Get("output_tokens").Int()), TotalTokens: int(u.Get("total_tokens").Int()),
+				PromptTokens: u.Get("input_tokens").Int(), CompletionTokens: u.Get("output_tokens").Int(), TotalTokens: u.Get("total_tokens").Int(),
 			}
 			if v := u.Get("input_tokens_details.cached_tokens"); v.Exists() {
-				event.Usage.CachedTokens = int(v.Int())
+				event.Usage.CachedTokens = v.Int()
 			}
 			if v := u.Get("output_tokens_details.reasoning_tokens"); v.Exists() {
-				event.Usage.ThoughtsTokenCount = int(v.Int())
+				event.Usage.ThoughtsTokenCount = int32(v.Int())
 			}
 		}
 		events = append(events, event)
@@ -549,12 +571,27 @@ func parseOpenAIMessage(m gjson.Result) ir.Message {
 	roleStr := m.Get("role").String()
 	msg := ir.Message{Role: ir.MapStandardRole(roleStr)}
 
+	// Parse cache_control if present
+	if cc := m.Get("cache_control"); cc.Exists() && cc.IsObject() {
+		msg.CacheControl = &ir.CacheControl{
+			Type: cc.Get("type").String(),
+		}
+		if ttl := cc.Get("ttl"); ttl.Exists() {
+			ttlVal := ttl.Int()
+			msg.CacheControl.TTL = &ttlVal
+		}
+	}
+
 	if roleStr == "assistant" {
 		if rf := ir.ParseReasoningFromJSON(m); rf.Text != "" {
+			var sig []byte
+			if rf.Signature != "" {
+				sig = []byte(rf.Signature)
+			}
 			msg.Content = append(msg.Content, ir.ContentPart{
 				Type:             ir.ContentTypeReasoning,
 				Reasoning:        rf.Text,
-				ThoughtSignature: rf.Signature,
+				ThoughtSignature: sig,
 			})
 		}
 	}
@@ -675,16 +712,22 @@ func parseOpenAITool(t gjson.Result) *ir.ToolDefinition {
 func parseThinkingConfig(root gjson.Result) *ir.ThinkingConfig {
 	var thinking *ir.ThinkingConfig
 	if re := root.Get("reasoning_effort"); re.Exists() {
-		thinking = &ir.ThinkingConfig{Effort: re.String()}
-		thinking.Budget, thinking.IncludeThoughts = ir.MapEffortToBudget(re.String())
+		thinking = &ir.ThinkingConfig{Effort: ir.ReasoningEffort(re.String())}
+		budget, include := ir.MapEffortToBudget(re.String())
+		b := int32(budget)
+		thinking.ThinkingBudget = &b
+		thinking.IncludeThoughts = include
 	}
 	if reasoning := root.Get("reasoning"); reasoning.Exists() && reasoning.IsObject() {
 		if thinking == nil {
 			thinking = &ir.ThinkingConfig{}
 		}
 		if effort := reasoning.Get("effort"); effort.Exists() {
-			thinking.Effort = effort.String()
-			thinking.Budget, thinking.IncludeThoughts = ir.MapEffortToBudget(effort.String())
+			thinking.Effort = ir.ReasoningEffort(effort.String())
+			budget, include := ir.MapEffortToBudget(effort.String())
+			b := int32(budget)
+			thinking.ThinkingBudget = &b
+			thinking.IncludeThoughts = include
 		}
 		if summary := reasoning.Get("summary"); summary.Exists() {
 			thinking.Summary = summary.String()
@@ -697,9 +740,11 @@ func parseThinkingConfig(root gjson.Result) *ir.ThinkingConfig {
 			thinking = &ir.ThinkingConfig{}
 		}
 		if v := tc.Get("thinkingBudget"); v.Exists() {
-			thinking.Budget = int(v.Int())
+			b := int32(v.Int())
+			thinking.ThinkingBudget = &b
 		} else if v := tc.Get("thinking_budget"); v.Exists() {
-			thinking.Budget = int(v.Int())
+			b := int32(v.Int())
+			thinking.ThinkingBudget = &b
 		}
 		if v := tc.Get("includeThoughts"); v.Exists() {
 			thinking.IncludeThoughts = v.Bool()

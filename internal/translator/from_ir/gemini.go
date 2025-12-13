@@ -113,9 +113,12 @@ func (p *GeminiProvider) applyGenerationConfig(root map[string]any, req *ir.Unif
 				genConfig["thinkingConfig"] = tc
 			} else {
 				// Gemini 2.5 and others use thinking_budget (always include thoughts for readable text)
-				budget := req.Thinking.Budget
+				budget := int32(0)
+				if req.Thinking.ThinkingBudget != nil {
+					budget = *req.Thinking.ThinkingBudget
+				}
 				if budget > 0 {
-					budget = util.NormalizeThinkingBudget(req.Model, budget)
+					budget = int32(util.NormalizeThinkingBudget(req.Model, int(budget)))
 				}
 				genConfig["thinkingConfig"] = map[string]any{
 					"thinkingBudget":  budget,
@@ -250,8 +253,8 @@ func (p *GeminiProvider) applyMessages(root map[string]any, req *ir.UnifiedChatR
 					part := map[string]any{
 						"functionCall": fcMap,
 					}
-					if tc.ThoughtSignature != "" {
-						part["thoughtSignature"] = tc.ThoughtSignature
+					if len(tc.ThoughtSignature) > 0 {
+						part["thoughtSignature"] = string(tc.ThoughtSignature)
 					} else if i == 0 {
 						// Fallback for missing signature (only for first tool call)
 						part["thoughtSignature"] = "skip_thought_signature_validator"
@@ -390,13 +393,13 @@ func (p *GeminiProvider) applyMessages(root map[string]any, req *ir.UnifiedChatR
 							"thought": true,
 						}
 						if isValidThoughtSignature(part.ThoughtSignature) {
-							p["thoughtSignature"] = part.ThoughtSignature
+							p["thoughtSignature"] = string(part.ThoughtSignature)
 						}
 						parts = append(parts, p)
 					case ir.ContentTypeText:
 						p := map[string]any{"text": part.Text}
 						if isValidThoughtSignature(part.ThoughtSignature) {
-							p["thoughtSignature"] = part.ThoughtSignature
+							p["thoughtSignature"] = string(part.ThoughtSignature)
 						}
 						parts = append(parts, p)
 					}
@@ -868,12 +871,13 @@ func (p *GeminiCLIProvider) ParseStreamChunkWithContext(chunkJSON []byte, schema
 
 // isValidThoughtSignature checks if a thought signature is valid for output.
 // Filters out invalid values like "[undefined]", "undefined", "null", empty strings.
-func isValidThoughtSignature(ts string) bool {
-	if ts == "" {
+func isValidThoughtSignature(ts []byte) bool {
+	if len(ts) == 0 {
 		return false
 	}
 	// Filter out invalid placeholder values from clients (e.g., Cherry Studio)
-	switch ts {
+	tsStr := string(ts)
+	switch tsStr {
 	case "[undefined]", "undefined", "null", "[null]":
 		return false
 	}

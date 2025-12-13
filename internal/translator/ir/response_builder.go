@@ -165,16 +165,16 @@ func (b *ResponseBuilder) BuildGeminiContentParts() []any {
 		case ContentTypeReasoning:
 			if part.Reasoning != "" {
 				p := map[string]any{"text": part.Reasoning, "thought": true}
-				if part.ThoughtSignature != "" {
-					p["thoughtSignature"] = part.ThoughtSignature
+				if len(part.ThoughtSignature) > 0 {
+					p["thoughtSignature"] = string(part.ThoughtSignature)
 				}
 				parts = append(parts, p)
 			}
 		case ContentTypeText:
 			if part.Text != "" {
 				p := map[string]any{"text": part.Text}
-				if part.ThoughtSignature != "" {
-					p["thoughtSignature"] = part.ThoughtSignature
+				if len(part.ThoughtSignature) > 0 {
+					p["thoughtSignature"] = string(part.ThoughtSignature)
 				}
 				parts = append(parts, p)
 			}
@@ -222,14 +222,50 @@ func (b *ResponseBuilder) BuildGeminiContentParts() []any {
 	return parts
 }
 
-// BuildUsageMap builds a usage statistics map
+// BuildUsageMap builds a usage statistics map with detailed token breakdown
 func (b *ResponseBuilder) BuildUsageMap() map[string]any {
 	if b.usage == nil {
 		return nil
 	}
-	return map[string]any{
+	usageMap := map[string]any{
 		"prompt_tokens":     b.usage.PromptTokens,
 		"completion_tokens": b.usage.CompletionTokens,
 		"total_tokens":      b.usage.TotalTokens,
 	}
+
+	// Add prompt_tokens_details if available
+	if b.usage.PromptTokensDetails != nil {
+		promptDetails := make(map[string]any)
+		if b.usage.PromptTokensDetails.CachedTokens > 0 {
+			promptDetails["cached_tokens"] = b.usage.PromptTokensDetails.CachedTokens
+		}
+		if b.usage.PromptTokensDetails.AudioTokens > 0 {
+			promptDetails["audio_tokens"] = b.usage.PromptTokensDetails.AudioTokens
+		}
+		if len(promptDetails) > 0 {
+			usageMap["prompt_tokens_details"] = promptDetails
+		}
+	}
+
+	// Add completion_tokens_details if available
+	if b.usage.CompletionTokensDetails != nil {
+		completionDetails := make(map[string]any)
+		if b.usage.CompletionTokensDetails.ReasoningTokens > 0 {
+			completionDetails["reasoning_tokens"] = b.usage.CompletionTokensDetails.ReasoningTokens
+		}
+		if b.usage.CompletionTokensDetails.AudioTokens > 0 {
+			completionDetails["audio_tokens"] = b.usage.CompletionTokensDetails.AudioTokens
+		}
+		if b.usage.CompletionTokensDetails.AcceptedPredictionTokens > 0 {
+			completionDetails["accepted_prediction_tokens"] = b.usage.CompletionTokensDetails.AcceptedPredictionTokens
+		}
+		if b.usage.CompletionTokensDetails.RejectedPredictionTokens > 0 {
+			completionDetails["rejected_prediction_tokens"] = b.usage.CompletionTokensDetails.RejectedPredictionTokens
+		}
+		if len(completionDetails) > 0 {
+			usageMap["completion_tokens_details"] = completionDetails
+		}
+	}
+
+	return usageMap
 }

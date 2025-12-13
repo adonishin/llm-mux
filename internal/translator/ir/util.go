@@ -20,8 +20,24 @@ func BytesToString(b []byte) string {
 var ErrInvalidJSON = &json.UnmarshalTypeError{Value: "invalid json"}
 
 // ExtractThoughtSignature extracts thought signature from a gjson.Result.
-// Handles both camelCase and snake_case field names.
-func ExtractThoughtSignature(part gjson.Result) string {
+// Returns []byte as per SDK spec. Handles both camelCase and snake_case field names.
+// ThoughtSignature is an opaque binary blob, returned as base64-encoded in JSON.
+func ExtractThoughtSignature(part gjson.Result) []byte {
+	var tsStr string
+	if ts := part.Get("thoughtSignature").String(); ts != "" {
+		tsStr = ts
+	} else {
+		tsStr = part.Get("thought_signature").String()
+	}
+	if tsStr == "" {
+		return nil
+	}
+	// Return raw string as bytes - API returns base64 which we preserve as-is
+	return []byte(tsStr)
+}
+
+// ExtractThoughtSignatureString extracts thought signature as string (for backward compatibility).
+func ExtractThoughtSignatureString(part gjson.Result) string {
 	if ts := part.Get("thoughtSignature").String(); ts != "" {
 		return ts
 	}
@@ -64,24 +80,59 @@ func ParseOpenAIUsage(u gjson.Result) *Usage {
 		return nil
 	}
 	usage := &Usage{
-		PromptTokens:     int(u.Get("prompt_tokens").Int() + u.Get("input_tokens").Int()),
-		CompletionTokens: int(u.Get("completion_tokens").Int() + u.Get("output_tokens").Int()),
-		TotalTokens:      int(u.Get("total_tokens").Int()),
+		PromptTokens:     u.Get("prompt_tokens").Int() + u.Get("input_tokens").Int(),
+		CompletionTokens: u.Get("completion_tokens").Int() + u.Get("output_tokens").Int(),
+		TotalTokens:      u.Get("total_tokens").Int(),
 	}
 	if usage.TotalTokens == 0 {
 		usage.TotalTokens = usage.PromptTokens + usage.CompletionTokens
 	}
 
 	if v := u.Get("input_tokens_details.cached_tokens"); v.Exists() {
-		usage.CachedTokens = int(v.Int())
+		usage.CachedTokens = v.Int()
 	} else if v := u.Get("prompt_tokens_details.cached_tokens"); v.Exists() {
-		usage.CachedTokens = int(v.Int())
+		usage.CachedTokens = v.Int()
 	}
 
 	if v := u.Get("output_tokens_details.reasoning_tokens"); v.Exists() {
-		usage.ThoughtsTokenCount = int(v.Int())
+		usage.ThoughtsTokenCount = int32(v.Int())
 	} else if v := u.Get("completion_tokens_details.reasoning_tokens"); v.Exists() {
-		usage.ThoughtsTokenCount = int(v.Int())
+		usage.ThoughtsTokenCount = int32(v.Int())
+	}
+
+	// Parse prompt_tokens_details
+	if ptd := u.Get("prompt_tokens_details"); ptd.Exists() {
+		promptDetails := &PromptTokensDetails{}
+		if v := ptd.Get("cached_tokens"); v.Exists() {
+			promptDetails.CachedTokens = v.Int()
+		}
+		if v := ptd.Get("audio_tokens"); v.Exists() {
+			promptDetails.AudioTokens = v.Int()
+		}
+		if promptDetails.CachedTokens > 0 || promptDetails.AudioTokens > 0 {
+			usage.PromptTokensDetails = promptDetails
+		}
+	}
+
+	// Parse completion_tokens_details
+	if ctd := u.Get("completion_tokens_details"); ctd.Exists() {
+		completionDetails := &CompletionTokensDetails{}
+		if v := ctd.Get("reasoning_tokens"); v.Exists() {
+			completionDetails.ReasoningTokens = v.Int()
+		}
+		if v := ctd.Get("audio_tokens"); v.Exists() {
+			completionDetails.AudioTokens = v.Int()
+		}
+		if v := ctd.Get("accepted_prediction_tokens"); v.Exists() {
+			completionDetails.AcceptedPredictionTokens = v.Int()
+		}
+		if v := ctd.Get("rejected_prediction_tokens"); v.Exists() {
+			completionDetails.RejectedPredictionTokens = v.Int()
+		}
+		if completionDetails.ReasoningTokens > 0 || completionDetails.AudioTokens > 0 ||
+			completionDetails.AcceptedPredictionTokens > 0 || completionDetails.RejectedPredictionTokens > 0 {
+			usage.CompletionTokensDetails = completionDetails
+		}
 	}
 
 	return usage
@@ -234,7 +285,7 @@ func MapGeminiFinishReason(geminiReason string) FinishReason {
 	case "STOP", "FINISH_REASON_UNSPECIFIED", "UNKNOWN":
 		return FinishReasonStop
 	case "MAX_TOKENS":
-		return FinishReasonLength
+		return FinishReasonMaxTokens
 	case "SAFETY", "RECITATION":
 		return FinishReasonContentFilter
 	case "MALFORMED_FUNCTION_CALL":
@@ -378,10 +429,12 @@ func convertMalformedArgsToJSONFallback(argsRaw string) string {
 
 func MapClaudeFinishReason(claudeReason string) FinishReason {
 	switch claudeReason {
-	case "end_turn", "stop_sequence":
-		return FinishReasonStop
+	case "end_turn":
+		return FinishReasonEndTurn
+	case "stop_sequence":
+		return FinishReasonStopSequence
 	case "max_tokens":
-		return FinishReasonLength
+		return FinishReasonMaxTokens
 	case "tool_use":
 		return FinishReasonToolCalls
 	default:
@@ -404,14 +457,32 @@ func MapOpenAIFinishReason(openaiReason string) FinishReason {
 	}
 }
 
+// MapOpenAIFinishReasonExtended maps OpenAI finish reasons with extended reason types
+func MapOpenAIFinishReasonExtended(openaiReason string) FinishReason {
+	switch openaiReason {
+	case "stop":
+		return FinishReasonStop
+	case "length":
+		return FinishReasonMaxTokens
+	case "tool_calls", "function_call":
+		return FinishReasonToolCalls
+	case "content_filter":
+		return FinishReasonContentFilter
+	default:
+		return FinishReasonUnknown
+	}
+}
+
 func MapFinishReasonToOpenAI(reason FinishReason) string {
 	switch reason {
-	case FinishReasonLength:
+	case FinishReasonLength, FinishReasonMaxTokens:
 		return "length"
 	case FinishReasonToolCalls:
 		return "tool_calls"
 	case FinishReasonContentFilter:
 		return "content_filter"
+	case FinishReasonStopSequence, FinishReasonEndTurn:
+		return "stop"
 	default:
 		return "stop"
 	}
@@ -432,7 +503,11 @@ func MapStandardRole(role string) Role {
 
 func MapFinishReasonToClaude(reason FinishReason) string {
 	switch reason {
-	case FinishReasonLength:
+	case FinishReasonEndTurn:
+		return "end_turn"
+	case FinishReasonStopSequence:
+		return "stop_sequence"
+	case FinishReasonMaxTokens:
 		return "max_tokens"
 	case FinishReasonToolCalls:
 		return "tool_use"
@@ -443,10 +518,14 @@ func MapFinishReasonToClaude(reason FinishReason) string {
 
 func MapFinishReasonToGemini(reason FinishReason) string {
 	switch reason {
-	case FinishReasonStop, FinishReasonToolCalls:
+	case FinishReasonStop:
 		return "STOP"
-	case FinishReasonLength:
+	case FinishReasonLength, FinishReasonMaxTokens:
 		return "MAX_TOKENS"
+	case FinishReasonStopSequence, FinishReasonEndTurn:
+		return "STOP"
+	case FinishReasonToolCalls:
+		return "STOP"
 	case FinishReasonContentFilter:
 		return "SAFETY"
 	default:

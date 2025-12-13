@@ -545,10 +545,11 @@ func AddReasoningToMessage(msg map[string]any, reasoning, signature string) {
 }
 
 // GetFirstReasoningSignature extracts the first ThoughtSignature from message content parts.
+// Returns string representation for backward compatibility with Claude API.
 func GetFirstReasoningSignature(msg Message) string {
 	for _, part := range msg.Content {
-		if part.Type == ContentTypeReasoning && part.ThoughtSignature != "" {
-			return part.ThoughtSignature
+		if part.Type == ContentTypeReasoning && len(part.ThoughtSignature) > 0 {
+			return string(part.ThoughtSignature)
 		}
 	}
 	return ""

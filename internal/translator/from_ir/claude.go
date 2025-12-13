@@ -84,12 +84,16 @@ func (p *ClaudeProvider) ConvertRequest(req *ir.UnifiedChatRequest) ([]byte, err
 
 	if req.Thinking != nil {
 		thinking := map[string]any{}
-		if req.Thinking.IncludeThoughts && req.Thinking.Budget != 0 {
+		budget := int32(0)
+		if req.Thinking.ThinkingBudget != nil {
+			budget = *req.Thinking.ThinkingBudget
+		}
+		if req.Thinking.IncludeThoughts && budget != 0 {
 			thinking["type"] = "enabled"
-			if req.Thinking.Budget > 0 {
-				thinking["budget_tokens"] = req.Thinking.Budget
+			if budget > 0 {
+				thinking["budget_tokens"] = budget
 			}
-		} else if req.Thinking.Budget == 0 {
+		} else if budget == 0 && !req.Thinking.IncludeThoughts {
 			thinking["type"] = "disabled"
 		}
 		if len(thinking) > 0 {
@@ -106,11 +110,29 @@ func (p *ClaudeProvider) ConvertRequest(req *ir.UnifiedChatRequest) ([]byte, err
 			}
 		case ir.RoleUser:
 			if parts := buildClaudeContentParts(msg, false); len(parts) > 0 {
-				messages = append(messages, map[string]any{"role": ir.ClaudeRoleUser, "content": parts})
+				msgObj := map[string]any{"role": ir.ClaudeRoleUser, "content": parts}
+				// Add cache_control if present
+				if msg.CacheControl != nil {
+					cacheCtrl := map[string]any{"type": msg.CacheControl.Type}
+					if msg.CacheControl.TTL != nil {
+						cacheCtrl["ttl"] = *msg.CacheControl.TTL
+					}
+					msgObj["cache_control"] = cacheCtrl
+				}
+				messages = append(messages, msgObj)
 			}
 		case ir.RoleAssistant:
 			if parts := buildClaudeContentParts(msg, true); len(parts) > 0 {
-				messages = append(messages, map[string]any{"role": ir.ClaudeRoleAssistant, "content": parts})
+				msgObj := map[string]any{"role": ir.ClaudeRoleAssistant, "content": parts}
+				// Add cache_control if present
+				if msg.CacheControl != nil {
+					cacheCtrl := map[string]any{"type": msg.CacheControl.Type}
+					if msg.CacheControl.TTL != nil {
+						cacheCtrl["ttl"] = *msg.CacheControl.TTL
+					}
+					msgObj["cache_control"] = cacheCtrl
+				}
+				messages = append(messages, msgObj)
 			}
 		case ir.RoleTool:
 			for _, part := range msg.Content {

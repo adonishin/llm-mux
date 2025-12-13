@@ -53,8 +53,33 @@ func ParseClaudeUsage(usage gjson.Result) *Usage {
 	if !usage.Exists() {
 		return nil
 	}
-	input, output := int(usage.Get("input_tokens").Int()), int(usage.Get("output_tokens").Int())
-	return &Usage{PromptTokens: input, CompletionTokens: output, TotalTokens: input + output}
+	input, output := usage.Get("input_tokens").Int(), usage.Get("output_tokens").Int()
+	u := &Usage{PromptTokens: input, CompletionTokens: output, TotalTokens: input + output}
+
+	// Parse Claude-specific cache tokens
+	if v := usage.Get("cache_creation_input_tokens"); v.Exists() {
+		u.CacheCreationInputTokens = v.Int()
+	}
+	if v := usage.Get("cache_read_input_tokens"); v.Exists() {
+		u.CacheReadInputTokens = v.Int()
+	}
+
+	// Parse prompt_tokens_details for Claude cache tokens
+	if cacheCreationTokens := usage.Get("cache_creation_input_tokens"); cacheCreationTokens.Exists() && cacheCreationTokens.Int() > 0 {
+		if u.PromptTokensDetails == nil {
+			u.PromptTokensDetails = &PromptTokensDetails{}
+		}
+		u.PromptTokensDetails.CachedTokens = cacheCreationTokens.Int()
+	}
+	if cacheReadTokens := usage.Get("cache_read_input_tokens"); cacheReadTokens.Exists() && cacheReadTokens.Int() > 0 {
+		if u.PromptTokensDetails == nil {
+			u.PromptTokensDetails = &PromptTokensDetails{}
+		}
+		// Claude provides separate cache read tokens, include in details
+		u.PromptTokensDetails.CachedTokens = cacheReadTokens.Int()
+	}
+
+	return u
 }
 
 // ParseClaudeContentBlock parses a Claude content block into IR Message parts.
@@ -68,7 +93,7 @@ func ParseClaudeContentBlock(block gjson.Result, msg *Message) {
 		if thinking := block.Get("thinking").String(); thinking != "" {
 			part := ContentPart{Type: ContentTypeReasoning, Reasoning: thinking}
 			if sig := block.Get("signature").String(); sig != "" {
-				part.ThoughtSignature = sig
+				part.ThoughtSignature = []byte(sig)
 			}
 			msg.Content = append(msg.Content, part)
 		}
@@ -140,9 +165,9 @@ func ParseClaudeStreamDeltaWithState(parsed gjson.Result, state *ClaudeStreamPar
 		}
 	case ClaudeDeltaThinking:
 		if thinking := delta.Get("thinking").String(); thinking != "" {
-			var sig string
-			if state != nil {
-				sig = state.CurrentThinkingSignature
+			var sig []byte
+			if state != nil && state.CurrentThinkingSignature != "" {
+				sig = []byte(state.CurrentThinkingSignature)
 			}
 			return []UnifiedEvent{{Type: EventTypeReasoning, Reasoning: thinking, ThoughtSignature: sig}}
 		}

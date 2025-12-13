@@ -61,10 +61,14 @@ func ParseGeminiRequest(rawJSON []byte) (*ir.UnifiedChatRequest, error) {
 		if tc := gc.Get("thinkingConfig"); tc.Exists() {
 			req.Thinking = &ir.ThinkingConfig{}
 			if v := tc.Get("thinkingBudget"); v.Exists() {
-				req.Thinking.Budget = int(v.Int())
+				b := int32(v.Int())
+				req.Thinking.ThinkingBudget = &b
 			}
 			if v := tc.Get("includeThoughts"); v.Exists() {
 				req.Thinking.IncludeThoughts = v.Bool()
+			}
+			if v := tc.Get("thinkingLevel"); v.Exists() {
+				req.Thinking.ThinkingLevel = ir.ThinkingLevel(v.String())
 			}
 		}
 
@@ -372,7 +376,7 @@ func parseGeminiCandidate(candidate gjson.Result, schemaCtx *ir.ToolSchemaContex
 			msg.Content = append(msg.Content, ir.ContentPart{
 				Type: ir.ContentTypeExecutableCode,
 				CodeExecution: &ir.CodeExecutionPart{
-					Language: ec.Get("language").String(),
+					Language: ir.Language(ec.Get("language").String()),
 					Code:     ec.Get("code").String(),
 				},
 				ThoughtSignature: ts,
@@ -381,7 +385,7 @@ func parseGeminiCandidate(candidate gjson.Result, schemaCtx *ir.ToolSchemaContex
 			msg.Content = append(msg.Content, ir.ContentPart{
 				Type: ir.ContentTypeCodeResult,
 				CodeExecution: &ir.CodeExecutionPart{
-					Outcome: cer.Get("outcome").String(),
+					Outcome: ir.Outcome(cer.Get("outcome").String()),
 					Output:  cer.Get("output").String(),
 				},
 				ThoughtSignature: ts,
@@ -460,7 +464,7 @@ func ParseGeminiResponseMetaWithContext(rawJSON []byte, schemaCtx *ir.ToolSchema
 			msg.Content = append(msg.Content, ir.ContentPart{
 				Type: ir.ContentTypeExecutableCode,
 				CodeExecution: &ir.CodeExecutionPart{
-					Language: ec.Get("language").String(),
+					Language: ir.Language(ec.Get("language").String()),
 					Code:     ec.Get("code").String(),
 				},
 				ThoughtSignature: ts,
@@ -470,14 +474,14 @@ func ParseGeminiResponseMetaWithContext(rawJSON []byte, schemaCtx *ir.ToolSchema
 			msg.Content = append(msg.Content, ir.ContentPart{
 				Type: ir.ContentTypeCodeResult,
 				CodeExecution: &ir.CodeExecutionPart{
-					Outcome: cer.Get("outcome").String(),
+					Outcome: ir.Outcome(cer.Get("outcome").String()),
 					Output:  cer.Get("output").String(),
 				},
 				ThoughtSignature: ts,
 			})
 		} else if img := parseGeminiInlineImage(part); img != nil {
 			msg.Content = append(msg.Content, ir.ContentPart{Type: ir.ContentTypeImage, Image: img, ThoughtSignature: ts})
-		} else if ts != "" {
+		} else if len(ts) > 0 {
 			// Part with only thought signature (and maybe empty text)
 			// Preserve it as a reasoning part with empty text
 			msg.Content = append(msg.Content, ir.ContentPart{Type: ir.ContentTypeReasoning, Reasoning: "", ThoughtSignature: ts})
@@ -596,7 +600,7 @@ func ParseGeminiChunkWithContext(rawJSON []byte, schemaCtx *ir.ToolSchemaContext
 				events = append(events, ir.UnifiedEvent{
 					Type: ir.EventTypeCodeExecution,
 					CodeExecution: &ir.CodeExecutionPart{
-						Language: ec.Get("language").String(),
+						Language: ir.Language(ec.Get("language").String()),
 						Code:     ec.Get("code").String(),
 					},
 					ThoughtSignature: ts,
@@ -606,12 +610,12 @@ func ParseGeminiChunkWithContext(rawJSON []byte, schemaCtx *ir.ToolSchemaContext
 				events = append(events, ir.UnifiedEvent{
 					Type: ir.EventTypeCodeExecution,
 					CodeExecution: &ir.CodeExecutionPart{
-						Outcome: cer.Get("outcome").String(),
+						Outcome: ir.Outcome(cer.Get("outcome").String()),
 						Output:  cer.Get("output").String(),
 					},
 					ThoughtSignature: ts,
 				})
-			} else if ts != "" {
+			} else if len(ts) > 0 {
 				// Part with only thought signature
 				events = append(events, ir.UnifiedEvent{Type: ir.EventTypeReasoning, Reasoning: "", ThoughtSignature: ts})
 			}
@@ -708,7 +712,7 @@ func parseGroundingMetadata(gm gjson.Result) *ir.GroundingMetadata {
 					Domain: web.Get("domain").String(),
 				}
 			}
-			meta.GroundingChunks = append(meta.GroundingChunks, gc)
+			meta.GroundingChunks = append(meta.GroundingChunks, &gc)
 		}
 	}
 
@@ -718,17 +722,23 @@ func parseGroundingMetadata(gm gjson.Result) *ir.GroundingMetadata {
 			gs := ir.GroundingSupport{}
 			if segment := support.Get("segment"); segment.Exists() {
 				gs.Segment = &ir.GroundingSegment{
-					StartIndex: int(segment.Get("startIndex").Int()),
-					EndIndex:   int(segment.Get("endIndex").Int()),
+					StartIndex: int32(segment.Get("startIndex").Int()),
+					EndIndex:   int32(segment.Get("endIndex").Int()),
+					PartIndex:  int32(segment.Get("partIndex").Int()),
 					Text:       segment.Get("text").String(),
 				}
 			}
 			if indices := support.Get("groundingChunkIndices"); indices.Exists() && indices.IsArray() {
 				for _, idx := range indices.Array() {
-					gs.GroundingChunkIndices = append(gs.GroundingChunkIndices, int(idx.Int()))
+					gs.GroundingChunkIndices = append(gs.GroundingChunkIndices, int32(idx.Int()))
 				}
 			}
-			meta.GroundingSupports = append(meta.GroundingSupports, gs)
+			if scores := support.Get("confidenceScores"); scores.Exists() && scores.IsArray() {
+				for _, s := range scores.Array() {
+					gs.ConfidenceScores = append(gs.ConfidenceScores, float32(s.Float()))
+				}
+			}
+			meta.GroundingSupports = append(meta.GroundingSupports, &gs)
 		}
 	}
 
@@ -770,14 +780,33 @@ func parseGeminiUsage(parsed gjson.Result) *ir.Usage {
 	if !u.Exists() {
 		return nil
 	}
-	promptTokens := int(u.Get("promptTokenCount").Int())
-	thoughtsTokens := int(u.Get("thoughtsTokenCount").Int())
-	return &ir.Usage{
-		PromptTokens:       promptTokens + thoughtsTokens,
-		CompletionTokens:   int(u.Get("candidatesTokenCount").Int()),
-		TotalTokens:        int(u.Get("totalTokenCount").Int()),
+	promptTokens := u.Get("promptTokenCount").Int()
+	thoughtsTokens := int32(u.Get("thoughtsTokenCount").Int())
+	usage := &ir.Usage{
+		PromptTokens:       promptTokens + int64(thoughtsTokens),
+		CompletionTokens:   u.Get("candidatesTokenCount").Int(),
+		TotalTokens:        u.Get("totalTokenCount").Int(),
 		ThoughtsTokenCount: thoughtsTokens,
 	}
+
+	// Parse prompt_tokens_details from Gemini
+	if cachedContentTokens := u.Get("cachedContentTokenCount"); cachedContentTokens.Exists() && cachedContentTokens.Int() > 0 {
+		if usage.PromptTokensDetails == nil {
+			usage.PromptTokensDetails = &ir.PromptTokensDetails{}
+		}
+		usage.PromptTokensDetails.CachedTokens = cachedContentTokens.Int()
+	}
+
+	// Parse completion_tokens_details from Gemini
+	// Gemini returns reasoning tokens as part of candidatesTokenCount
+	if thoughtsTokens > 0 {
+		if usage.CompletionTokensDetails == nil {
+			usage.CompletionTokensDetails = &ir.CompletionTokensDetails{}
+		}
+		usage.CompletionTokensDetails.ReasoningTokens = int64(thoughtsTokens)
+	}
+
+	return usage
 }
 
 // parseGeminiLogprobs extracts logprobs from Gemini candidate and converts to OpenAI format.

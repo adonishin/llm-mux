@@ -123,7 +123,8 @@ func convertRequestToIR(from sdktranslator.Format, model string, payload []byte,
 				irReq.Thinking = &ir.ThinkingConfig{}
 			}
 			if budgetOverride != nil {
-				irReq.Thinking.Budget = *budgetOverride
+				b := int32(*budgetOverride)
+				irReq.Thinking.ThinkingBudget = &b
 			}
 			if includeOverride != nil {
 				irReq.Thinking.IncludeThoughts = *includeOverride
@@ -569,7 +570,7 @@ func TranslateGeminiCLIResponseStream(cfg *config.Config, to sdktranslator.Forma
 						event.Usage = &ir.Usage{}
 					}
 					if event.Usage.ThoughtsTokenCount == 0 {
-						event.Usage.ThoughtsTokenCount = (state.ReasoningCharsAccum + 2) / 3
+						event.Usage.ThoughtsTokenCount = int32((state.ReasoningCharsAccum + 2) / 3)
 					}
 				}
 			}
@@ -767,7 +768,7 @@ func TranslateGeminiResponseStream(cfg *config.Config, to sdktranslator.Format, 
 						event.Usage = &ir.Usage{}
 					}
 					if event.Usage.ThoughtsTokenCount == 0 {
-						event.Usage.ThoughtsTokenCount = (state.ReasoningCharsAccum + 2) / 3
+						event.Usage.ThoughtsTokenCount = int32((state.ReasoningCharsAccum + 2) / 3)
 					}
 				}
 			}
@@ -930,7 +931,7 @@ func TranslateOpenAIResponseStream(cfg *config.Config, to sdktranslator.Format, 
 				}
 				if event.Usage.ThoughtsTokenCount == 0 {
 					// Estimate: ~3 chars per token (conservative for mixed languages)
-					event.Usage.ThoughtsTokenCount = (state.ReasoningCharsAccum + 2) / 3
+					event.Usage.ThoughtsTokenCount = int32((state.ReasoningCharsAccum + 2) / 3)
 				}
 			}
 

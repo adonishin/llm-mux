@@ -976,11 +976,11 @@ func alias2ModelName(modelName string) string {
 		return "gemini-3-pro-image"
 	case "gemini-3-pro-preview":
 		return "gemini-3-pro-high"
-	case "gemini-claude-sonnet-4-5":
+	case "gemini-claude-sonnet-4-5", "claude-sonnet-4-5":
 		return "claude-sonnet-4-5"
-	case "gemini-claude-sonnet-4-5-thinking":
+	case "gemini-claude-sonnet-4-5-thinking", "claude-sonnet-4-5-thinking":
 		return "claude-sonnet-4-5-thinking"
-	case "gemini-claude-opus-4-5-thinking":
+	case "gemini-claude-opus-4-5-thinking", "claude-opus-4-5-thinking":
 		return "claude-opus-4-5-thinking"
 	default:
 		return modelName

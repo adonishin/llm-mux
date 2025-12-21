@@ -3,8 +3,7 @@
 [![GitHub stars](https://img.shields.io/github/stars/nghyane/llm-mux?style=social)](https://github.com/nghyane/llm-mux)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-blue)](https://github.com/nghyane/llm-mux)
-[![Go Version](https://img.shields.io/badge/go-1.24-cyan)](https://golang.org)
-[![Docker](https://img.shields.io/badge/docker-available-blue)](https://hub.docker.com/r/nghyane/llm-mux)
+[![Go Version](https://img.shields.io/badge/go-1.25-cyan)](https://golang.org)
 
 **Turn your existing AI subscriptions into API endpoints.** A local gateway that converts Claude Pro, GitHub Copilot, and Google Cloud Code subscriptions into OpenAI-compatible APIs.
 
@@ -127,7 +126,8 @@ curl http://localhost:8318/v1/chat/completions \
 |:------|:--------|:--------------|
 | `gemini-2.5-pro` | 1M tokens | `--login` or `--antigravity-login` |
 | `gemini-2.5-flash` | 1M tokens | `--login` or `--antigravity-login` |
-| `gemini-3-flash` | 1M tokens | `--antigravity-login` |
+| `gemini-2.5-flash-lite` | 1M tokens | `--login` or `--antigravity-login` |
+| `gemini-3-flash-preview` | 1M tokens | `--antigravity-login` |
 | `gemini-3-pro-preview` | 1M tokens | `--antigravity-login` |
 
 ### Claude (via Claude Pro/Max Subscription)
@@ -144,7 +144,7 @@ curl http://localhost:8318/v1/chat/completions \
 |:------|:--------|:--------------|
 | `gpt-4.1` | 128K tokens | `--copilot-login` |
 | `gpt-4o` | 128K tokens | `--copilot-login` |
-| `gpt-5` | 128K tokens | `--copilot-login` |
+| `gpt-5-mini` | 128K tokens | `--copilot-login` |
 | `gpt-5.1-codex-max` | 128K tokens | `--copilot-login` |
 
 ### Other Providers

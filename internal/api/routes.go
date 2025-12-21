@@ -115,6 +115,7 @@ func (s *Server) setupRoutes() {
 	s.engine.GET("/anthropic/callback", oauthCallbackHandler("anthropic"))
 	s.engine.GET("/codex/callback", oauthCallbackHandler("codex"))
 	s.engine.GET("/google/callback", oauthCallbackHandler("gemini"))
+	s.engine.GET("/gemini/callback", oauthCallbackHandler("gemini")) // alias
 	s.engine.GET("/iflow/callback", oauthCallbackHandler("iflow"))
 	s.engine.GET("/antigravity/callback", oauthCallbackHandler("antigravity"))
 

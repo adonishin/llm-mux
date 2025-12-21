@@ -38,7 +38,6 @@ var (
 	DefaultConfigPath = "~/.config/llm-mux/config.yaml"
 )
 
-
 // init initializes the shared logger setup.
 func init() {
 	logging.SetupBaseLogger()
@@ -53,7 +52,6 @@ func init() {
 func main() {
 	fmt.Printf("llm-mux Version: %s, Commit: %s, BuiltAt: %s\n", buildinfo.Version, buildinfo.Commit, buildinfo.BuildDate)
 
-	// Command-line flags to control the application's behavior.
 	var login bool
 	var codexLogin bool
 	var claudeLogin bool
@@ -66,12 +64,12 @@ func main() {
 	var kiroLogin bool
 	var copilotLogin bool
 	var initConfig bool
+	var forceInit bool
 	var projectID string
 	var vertexImport string
 	var configPath string
 	var password string
 
-	// Define command-line flags for different operation modes.
 	flag.BoolVar(&login, "login", false, "Login Google Account")
 	flag.BoolVar(&codexLogin, "codex-login", false, "Login to Codex using OAuth")
 	flag.BoolVar(&claudeLogin, "claude-login", false, "Login to Claude using OAuth")
@@ -83,7 +81,8 @@ func main() {
 	flag.BoolVar(&antigravityLogin, "antigravity-login", false, "Login to Antigravity using OAuth")
 	flag.BoolVar(&kiroLogin, "kiro-login", false, "Login to Kiro (Amazon Q) using refresh token")
 	flag.BoolVar(&copilotLogin, "copilot-login", false, "Login to GitHub Copilot using device flow")
-	flag.BoolVar(&initConfig, "init", false, "Initialize config file with default template")
+	flag.BoolVar(&initConfig, "init", false, "Initialize config and generate management key")
+	flag.BoolVar(&forceInit, "force", false, "Force regenerate management key (use with --init)")
 	flag.StringVar(&projectID, "project_id", "", "Project ID (Gemini only, not required)")
 	flag.StringVar(&configPath, "config", DefaultConfigPath, "Configure File Path")
 	flag.StringVar(&vertexImport, "vertex-import", "", "Import Vertex service account key JSON file")
@@ -116,12 +115,10 @@ func main() {
 		})
 	}
 
-	// Parse the command-line flags.
 	flag.Parse()
 
-	// Handle --init early, before config loading
 	if initConfig {
-		doInitConfig(configPath)
+		doInitConfig(configPath, forceInit)
 		return
 	}
 
@@ -531,41 +528,59 @@ func autoInitConfig(configPath string) {
 	fmt.Printf("First run: created config at %s\n", configPath)
 }
 
-// doInitConfig creates a config file from the embedded template (explicit --init)
-func doInitConfig(configPath string) {
+// doInitConfig handles --init with smart behavior:
+// - Config missing → create config
+// - Credentials missing → create credentials (always at ~/.config/llm-mux/)
+// - Both exist → show current key (use --force to regenerate)
+func doInitConfig(configPath string, force bool) {
 	configPath = expandPath(configPath)
-
-	// Check if config already exists
-	if _, err := os.Stat(configPath); err == nil {
-		fmt.Printf("Config file already exists: %s\n", configPath)
-		fmt.Println("Remove it first if you want to reinitialize.")
-		return
-	}
-
 	dir := filepath.Dir(configPath)
+	credPath := config.CredentialsFilePath()
+
+	configExists := fileExists(configPath)
+	credExists := fileExists(credPath)
+
+	// Ensure config directory exists
 	if err := os.MkdirAll(dir, 0o700); err != nil {
-		log.Fatalf("Failed to create config directory %s: %v", dir, err)
+		log.Fatalf("Failed to create directory: %v", err)
+	}
+	_ = os.MkdirAll(filepath.Join(dir, "auth"), 0o700)
+
+	// Create config if missing
+	if !configExists {
+		if err := os.WriteFile(configPath, embedded.DefaultConfigTemplate, 0o600); err != nil {
+			log.Fatalf("Failed to write config: %v", err)
+		}
+		fmt.Printf("Created: %s\n", configPath)
 	}
 
-	authDir := filepath.Join(dir, "auth")
-	if err := os.MkdirAll(authDir, 0o700); err != nil {
-		log.Fatalf("Failed to create auth directory %s: %v", authDir, err)
+	// Handle credentials (always at fixed path)
+	if credExists && !force {
+		key := config.GetManagementKey()
+		if key != "" {
+			fmt.Printf("Management key: %s\n", key)
+			fmt.Printf("Location: %s\n", credPath)
+			fmt.Println("Use --init --force to regenerate")
+			return
+		}
 	}
 
-	if err := os.WriteFile(configPath, embedded.DefaultConfigTemplate, 0o600); err != nil {
-		log.Fatalf("Failed to write config file: %v", err)
+	// Generate new key
+	key, err := config.CreateCredentials()
+	if err != nil {
+		log.Fatalf("Failed to create credentials: %v", err)
 	}
 
-	fmt.Printf("Created config file: %s\n", configPath)
-	fmt.Printf("Created auth directory: %s\n", authDir)
-	fmt.Println()
-	fmt.Println("Next steps:")
-	fmt.Println("  1. Edit the config file to customize settings")
-	fmt.Println("  2. Add OAuth credentials:")
-	fmt.Println("     llm-mux --login              # Google/Gemini")
-	fmt.Println("     llm-mux --claude-login       # Claude")
-	fmt.Println("     llm-mux --codex-login        # OpenAI Codex")
-	fmt.Println("     llm-mux --copilot-login      # GitHub Copilot")
-	fmt.Println("  3. Start the server:")
-	fmt.Println("     llm-mux")
+	if credExists && force {
+		fmt.Println("Regenerated management key:")
+	} else {
+		fmt.Println("Generated management key:")
+	}
+	fmt.Printf("  %s\n", key)
+	fmt.Printf("Location: %s\n", credPath)
+}
+
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
 }

@@ -190,16 +190,6 @@ func buildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 	if oldCfg.RemoteManagement.DisableControlPanel != newCfg.RemoteManagement.DisableControlPanel {
 		changes = append(changes, fmt.Sprintf("remote-management.disable-control-panel: %t -> %t", oldCfg.RemoteManagement.DisableControlPanel, newCfg.RemoteManagement.DisableControlPanel))
 	}
-	if oldCfg.RemoteManagement.SecretKey != newCfg.RemoteManagement.SecretKey {
-		switch {
-		case oldCfg.RemoteManagement.SecretKey == "" && newCfg.RemoteManagement.SecretKey != "":
-			changes = append(changes, "remote-management.secret-key: created")
-		case oldCfg.RemoteManagement.SecretKey != "" && newCfg.RemoteManagement.SecretKey == "":
-			changes = append(changes, "remote-management.secret-key: deleted")
-		default:
-			changes = append(changes, "remote-management.secret-key: updated")
-		}
-	}
 
 	// OpenAI compatibility providers (summarized)
 	if compat := diffOpenAICompatibility(oldCfg.OpenAICompatibility, newCfg.OpenAICompatibility); len(compat) > 0 {

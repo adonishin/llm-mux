@@ -18,7 +18,6 @@ import (
 	"github.com/nghyane/llm-mux/internal/usage"
 	sdkAuth "github.com/nghyane/llm-mux/sdk/auth"
 	coreauth "github.com/nghyane/llm-mux/sdk/cliproxy/auth"
-	"golang.org/x/crypto/bcrypt"
 )
 
 type attemptInfo struct {
@@ -38,12 +37,12 @@ type Handler struct {
 	tokenStore          coreauth.Store
 	localPassword       string
 	allowRemoteOverride bool
-	envSecret           string
 	logDir              string
 }
 
 // NewHandler creates a new management handler instance.
 func NewHandler(cfg *config.Config, configFilePath string, manager *coreauth.Manager) *Handler {
+	// Check if MANAGEMENT_PASSWORD env is set to enable remote override
 	envSecret, _ := os.LookupEnv("MANAGEMENT_PASSWORD")
 	envSecret = strings.TrimSpace(envSecret)
 
@@ -55,7 +54,6 @@ func NewHandler(cfg *config.Config, configFilePath string, manager *coreauth.Man
 		usageStats:          usage.GetRequestStatistics(),
 		tokenStore:          sdkAuth.GetTokenStore(),
 		allowRemoteOverride: envSecret != "",
-		envSecret:           envSecret,
 	}
 }
 
@@ -87,6 +85,7 @@ func (h *Handler) SetLogDirectory(dir string) {
 // Middleware enforces access control for management endpoints.
 // All requests (local and remote) require a valid management key.
 // Additionally, remote access requires allow-remote-management=true.
+// Key priority: MANAGEMENT_PASSWORD env > ~/.config/llm-mux/credentials.json
 func (h *Handler) Middleware() gin.HandlerFunc {
 	const maxFailures = 5
 	const banDuration = 30 * time.Minute
@@ -99,18 +98,16 @@ func (h *Handler) Middleware() gin.HandlerFunc {
 		clientIP := c.ClientIP()
 		localClient := clientIP == "127.0.0.1" || clientIP == "::1"
 		cfg := h.cfg
-		var (
-			allowRemote bool
-			secretHash  string
-		)
+		var allowRemote bool
 		if cfg != nil {
 			allowRemote = cfg.RemoteManagement.AllowRemote
-			secretHash = cfg.RemoteManagement.SecretKey
 		}
 		if h.allowRemoteOverride {
 			allowRemote = true
 		}
-		envSecret := h.envSecret
+
+		// Get management key (fixed path: ~/.config/llm-mux/credentials.json)
+		managementKey := config.GetManagementKey()
 
 		fail := func() {}
 		if !localClient {
@@ -151,8 +148,10 @@ func (h *Handler) Middleware() gin.HandlerFunc {
 				h.attemptsMu.Unlock()
 			}
 		}
-		if secretHash == "" && envSecret == "" {
-			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "remote management key not set"})
+
+		// Check if management key is configured
+		if managementKey == "" {
+			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "management key not configured"})
 			return
 		}
 
@@ -178,6 +177,7 @@ func (h *Handler) Middleware() gin.HandlerFunc {
 			return
 		}
 
+		// For localhost, also accept the runtime local password
 		if localClient {
 			if lp := h.localPassword; lp != "" {
 				if subtle.ConstantTimeCompare([]byte(provided), []byte(lp)) == 1 {
@@ -187,20 +187,8 @@ func (h *Handler) Middleware() gin.HandlerFunc {
 			}
 		}
 
-		if envSecret != "" && subtle.ConstantTimeCompare([]byte(provided), []byte(envSecret)) == 1 {
-			if !localClient {
-				h.attemptsMu.Lock()
-				if ai := h.failedAttempts[clientIP]; ai != nil {
-					ai.count = 0
-					ai.blockedUntil = time.Time{}
-				}
-				h.attemptsMu.Unlock()
-			}
-			c.Next()
-			return
-		}
-
-		if secretHash == "" || bcrypt.CompareHashAndPassword([]byte(secretHash), []byte(provided)) != nil {
+		// Validate against management key using constant-time comparison
+		if subtle.ConstantTimeCompare([]byte(provided), []byte(managementKey)) != 1 {
 			if !localClient {
 				fail()
 			}
@@ -208,6 +196,7 @@ func (h *Handler) Middleware() gin.HandlerFunc {
 			return
 		}
 
+		// Reset failed attempts on success
 		if !localClient {
 			h.attemptsMu.Lock()
 			if ai := h.failedAttempts[clientIP]; ai != nil {

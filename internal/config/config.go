@@ -13,7 +13,6 @@ import (
 	"syscall"
 
 	"github.com/nghyane/llm-mux/sdk/config"
-	"golang.org/x/crypto/bcrypt"
 	"gopkg.in/yaml.v3"
 )
 
@@ -91,7 +90,6 @@ type Config struct {
 	// before being translated to provider-specific formats.
 	// Default: true (canonical translator is now the primary path)
 	UseCanonicalTranslator bool `yaml:"use-canonical-translator" json:"use-canonical-translator" default:"true"`
-
 }
 
 // TLSConfig holds HTTPS server settings.
@@ -108,8 +106,6 @@ type TLSConfig struct {
 type RemoteManagement struct {
 	// AllowRemote toggles remote (non-localhost) access to management API.
 	AllowRemote bool `yaml:"allow-remote"`
-	// SecretKey is the management key (plaintext or bcrypt hashed). YAML key intentionally 'secret-key'.
-	SecretKey string `yaml:"secret-key"`
 	// DisableControlPanel skips serving and syncing the bundled management UI when true.
 	DisableControlPanel bool `yaml:"disable-control-panel"`
 }
@@ -369,20 +365,6 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 		return nil, fmt.Errorf("failed to parse config file: %w", err)
 	}
 
-	// Hash remote management key if plaintext is present (nested)
-	// We consider a value to be already hashed if it looks like a bcrypt hash ($2a$, $2b$, or $2y$ prefix).
-	if cfg.RemoteManagement.SecretKey != "" && !looksLikeBcrypt(cfg.RemoteManagement.SecretKey) {
-		hashed, errHash := hashSecret(cfg.RemoteManagement.SecretKey)
-		if errHash != nil {
-			return nil, fmt.Errorf("failed to hash remote management key: %w", errHash)
-		}
-		cfg.RemoteManagement.SecretKey = hashed
-
-		// Persist the hashed value back to the config file to avoid re-hashing on next startup.
-		// Preserve YAML comments and ordering; update only the nested key.
-		_ = SaveConfigPreserveCommentsUpdateNestedScalar(configFile, []string{"remote-management", "secret-key"}, hashed)
-	}
-
 	// Sync request authentication providers with inline API keys for backwards compatibility.
 	syncInlineAccessProvider(&cfg)
 
@@ -501,11 +483,6 @@ func syncInlineAccessProvider(cfg *Config) {
 	cfg.Access.Providers = nil
 }
 
-// looksLikeBcrypt returns true if the provided string appears to be a bcrypt hash.
-func looksLikeBcrypt(s string) bool {
-	return len(s) > 4 && (s[:4] == "$2a$" || s[:4] == "$2b$" || s[:4] == "$2y$")
-}
-
 // NormalizeHeaders trims header keys and values and removes empty pairs.
 func NormalizeHeaders(headers map[string]string) map[string]string {
 	if len(headers) == 0 {
@@ -573,16 +550,6 @@ func NormalizeOAuthExcludedModels(entries map[string][]string) map[string][]stri
 		return nil
 	}
 	return out
-}
-
-// hashSecret hashes the given secret using bcrypt.
-func hashSecret(secret string) (string, error) {
-	// Use default cost for simplicity.
-	hashedBytes, err := bcrypt.GenerateFromPassword([]byte(secret), bcrypt.DefaultCost)
-	if err != nil {
-		return "", err
-	}
-	return string(hashedBytes), nil
 }
 
 // SaveConfigPreserveComments writes the config back to YAML while preserving existing comments
@@ -1177,4 +1144,3 @@ func normalizeCollectionNodeStyles(node *yaml.Node) {
 		// Scalars keep their existing style to preserve quoting
 	}
 }
-

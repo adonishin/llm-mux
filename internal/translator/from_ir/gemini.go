@@ -268,246 +268,266 @@ func (p *GeminiProvider) applyGenerationConfig(root map[string]any, req *ir.Unif
 	return nil
 }
 
-// applyMessages converts messages to Gemini contents format.
 func (p *GeminiProvider) applyMessages(root map[string]any, req *ir.UnifiedChatRequest) error {
-	var contents []any
-	toolCallIDToName, toolResults := ir.BuildToolMaps(req.Messages)
+	if len(req.Messages) == 0 {
+		return nil
+	}
 
-	for _, msg := range req.Messages {
+	toolCallIDToName, toolResults := ir.BuildToolMaps(req.Messages)
+	coalescer := ir.GetContentCoalescer(len(req.Messages) * 2)
+
+	for i := range req.Messages {
+		msg := &req.Messages[i]
+
 		switch msg.Role {
 		case ir.RoleSystem:
-			var textContent string
-			for _, part := range msg.Content {
-				if part.Type == ir.ContentTypeText {
-					textContent = part.Text
-					break
-				}
-			}
-			if textContent != "" {
+			if text := p.extractSystemText(msg); text != "" {
 				root["systemInstruction"] = map[string]any{
-					"role": "user",
-					"parts": []any{
-						map[string]any{"text": textContent},
-					},
+					"role":  "user",
+					"parts": []any{map[string]any{"text": text}},
 				}
 			}
 
 		case ir.RoleUser:
-			// Pre-allocate parts slice
-			parts := make([]any, 0, len(msg.Content))
-			for i := range msg.Content {
-				part := &msg.Content[i]
-				switch part.Type {
-				case ir.ContentTypeText:
-					parts = append(parts, map[string]any{"text": part.Text})
-				case ir.ContentTypeImage:
-					if part.Image != nil {
-						if part.Image.Data != "" {
-							// Base64-encoded image data → inlineData
-							parts = append(parts, map[string]any{
-								"inlineData": map[string]any{
-									"mimeType": part.Image.MimeType,
-									"data":     part.Image.Data,
-								},
-							})
-						} else if url := part.Image.URL; strings.HasPrefix(url, "files/") || strings.HasPrefix(url, "gs://") {
-							// Gemini file URI or GCS URI → fileData
-							// Note: HTTP URLs and Claude FileID are silently skipped (no Gemini equivalent)
-							parts = append(parts, map[string]any{
-								"fileData": map[string]any{
-									"mimeType": part.Image.MimeType,
-									"fileUri":  url,
-								},
-							})
-						}
-					}
-				case ir.ContentTypeAudio:
-					if part.Audio != nil {
-						// Detect if Data is a file URI (starts with files/) or base64 data
-						if part.Audio.Data != "" && strings.HasPrefix(part.Audio.Data, "files/") {
-							parts = append(parts, map[string]any{
-								"fileData": map[string]any{
-									"mimeType": part.Audio.MimeType,
-									"fileUri":  part.Audio.Data,
-								},
-							})
-						} else if part.Audio.Data != "" {
-							parts = append(parts, map[string]any{
-								"inlineData": map[string]any{
-									"mimeType": part.Audio.MimeType,
-									"data":     part.Audio.Data,
-								},
-							})
-						}
-					}
-				case ir.ContentTypeVideo:
-					if part.Video != nil {
-						if part.Video.Data != "" {
-							parts = append(parts, map[string]any{
-								"inlineData": map[string]any{
-									"mimeType": part.Video.MimeType,
-									"data":     part.Video.Data,
-								},
-							})
-						} else if part.Video.FileURI != "" {
-							parts = append(parts, map[string]any{
-								"fileData": map[string]any{
-									"mimeType": part.Video.MimeType,
-									"fileUri":  part.Video.FileURI,
-								},
-							})
-						}
-					}
-				}
-			}
-			if len(parts) > 0 {
-				contents = append(contents, map[string]any{
-					"role":  "user",
-					"parts": parts,
-				})
-			}
+			parts := p.buildUserParts(msg)
+			coalescer.Emit("user", parts)
 
 		case ir.RoleAssistant:
-			// Consolidate content parts (Text/Reasoning) and ToolCalls into one "model" message.
-			// Claude Thinking requires strict ordering: Thinking -> Text? -> ToolCalls.
+			modelParts, responseParts := p.buildAssistantAndToolParts(
+				msg, toolCallIDToName, toolResults,
+			)
+			coalescer.Emit("model", modelParts)
+			coalescer.Emit("user", responseParts)
+		}
+	}
 
-			parts := make([]any, 0, len(msg.Content)+len(msg.ToolCalls))
+	contents := coalescer.Build()
+	ir.PutContentCoalescer(coalescer)
 
-			// Claude Thinking Protocol: Placeholder injection removed - signatures are cryptographically validated.
-			// SDK must send thinking blocks from previous turns back exactly as received.
-			// See: https://docs.anthropic.com/claude/docs/extended-thinking
+	if contents != nil {
+		root["contents"] = contents
+	}
+	return nil
+}
 
-			// 1. Process Content (Thinking/Text) and collect signature for propagation
-			var lastThoughtSignature []byte // Signature from thinking block to propagate to tool calls
-			for _, contentPart := range msg.Content {
-				switch contentPart.Type {
-				case ir.ContentTypeReasoning:
-					p := map[string]any{
-						"text":    contentPart.Reasoning,
-						"thought": true,
-					}
-					if isValidThoughtSignature(contentPart.ThoughtSignature) {
-						p["thoughtSignature"] = string(contentPart.ThoughtSignature)
-						// Store for propagation to tool calls (Gemini API requires this)
-						lastThoughtSignature = contentPart.ThoughtSignature
-						if debugToolCalls {
-							log.Debugf("gemini: captured thinking signature (len=%d) for propagation", len(lastThoughtSignature))
-						}
-					}
-					parts = append(parts, p)
-				case ir.ContentTypeText:
-					p := map[string]any{"text": contentPart.Text}
-					if isValidThoughtSignature(contentPart.ThoughtSignature) {
-						p["thoughtSignature"] = string(contentPart.ThoughtSignature)
-					}
-					parts = append(parts, p)
-				}
+func (p *GeminiProvider) extractSystemText(msg *ir.Message) string {
+	for i := range msg.Content {
+		if msg.Content[i].Type == ir.ContentTypeText {
+			return msg.Content[i].Text
+		}
+	}
+	return ""
+}
+
+func (p *GeminiProvider) buildUserParts(msg *ir.Message) []any {
+	parts := make([]any, 0, len(msg.Content))
+
+	for i := range msg.Content {
+		part := &msg.Content[i]
+		switch part.Type {
+		case ir.ContentTypeText:
+			if part.Text != "" {
+				parts = append(parts, map[string]any{"text": part.Text})
 			}
+		case ir.ContentTypeImage:
+			if p := p.buildImagePart(part.Image); p != nil {
+				parts = append(parts, p)
+			}
+		case ir.ContentTypeAudio:
+			if p := p.buildAudioPart(part.Audio); p != nil {
+				parts = append(parts, p)
+			}
+		case ir.ContentTypeVideo:
+			if p := p.buildVideoPart(part.Video); p != nil {
+				parts = append(parts, p)
+			}
+		}
+	}
+	return parts
+}
 
-			// 2. Process Tool Calls
-			var responseParts []any
+func (p *GeminiProvider) buildImagePart(img *ir.ImagePart) any {
+	if img == nil {
+		return nil
+	}
+	if img.Data != "" {
+		return map[string]any{
+			"inlineData": map[string]any{
+				"mimeType": img.MimeType,
+				"data":     img.Data,
+			},
+		}
+	}
+	if url := img.URL; strings.HasPrefix(url, "files/") || strings.HasPrefix(url, "gs://") {
+		return map[string]any{
+			"fileData": map[string]any{
+				"mimeType": img.MimeType,
+				"fileUri":  url,
+			},
+		}
+	}
+	return nil
+}
 
-			if len(msg.ToolCalls) > 0 {
-				toolCallIDs := make([]string, 0, len(msg.ToolCalls))
+func (p *GeminiProvider) buildAudioPart(audio *ir.AudioPart) any {
+	if audio == nil || audio.Data == "" {
+		return nil
+	}
+	if strings.HasPrefix(audio.Data, "files/") {
+		return map[string]any{
+			"fileData": map[string]any{
+				"mimeType": audio.MimeType,
+				"fileUri":  audio.Data,
+			},
+		}
+	}
+	return map[string]any{
+		"inlineData": map[string]any{
+			"mimeType": audio.MimeType,
+			"data":     audio.Data,
+		},
+	}
+}
 
-				for i := range msg.ToolCalls {
-					tc := &msg.ToolCalls[i]
-					argsJSON := ir.ValidateAndNormalizeJSON(tc.Args)
-					fcMap := map[string]any{
-						"name": tc.Name,
-						"args": json.RawMessage(argsJSON),
-					}
-					toolID := tc.ID
-					if toolID == "" {
-						toolID = fmt.Sprintf("call_%d_%d", time.Now().UnixNano(), i)
-					}
-					fcMap["id"] = toolID
+func (p *GeminiProvider) buildVideoPart(video *ir.VideoPart) any {
+	if video == nil {
+		return nil
+	}
+	if video.Data != "" {
+		return map[string]any{
+			"inlineData": map[string]any{
+				"mimeType": video.MimeType,
+				"data":     video.Data,
+			},
+		}
+	}
+	if video.FileURI != "" {
+		return map[string]any{
+			"fileData": map[string]any{
+				"mimeType": video.MimeType,
+				"fileUri":  video.FileURI,
+			},
+		}
+	}
+	return nil
+}
 
-					part := map[string]any{
-						"functionCall": fcMap,
-					}
-					// Use tool call's own signature, or propagate from thinking block
-					// Gemini API requires thoughtSignature on functionCall when thinking is enabled
-					if len(tc.ThoughtSignature) > 0 {
-						part["thoughtSignature"] = string(tc.ThoughtSignature)
-					} else if len(lastThoughtSignature) > 0 {
-						// Propagate signature from thinking block to tool call
-						// This is required for multi-turn flows where SDK doesn't preserve signature on tool_use
-						part["thoughtSignature"] = string(lastThoughtSignature)
-					}
-					parts = append(parts, part)
-					toolCallIDs = append(toolCallIDs, toolID)
-				}
+func (p *GeminiProvider) buildAssistantAndToolParts(
+	msg *ir.Message,
+	toolIDToName map[string]string,
+	toolResults map[string]*ir.ToolResultPart,
+) (modelParts, responseParts []any) {
+	if len(msg.Content) == 0 && len(msg.ToolCalls) == 0 {
+		return nil, nil
+	}
 
-				// Build Tool Results (User Response) based on IDs
+	var lastThoughtSig []byte
+
+	for i := range msg.Content {
+		cp := &msg.Content[i]
+		switch cp.Type {
+		case ir.ContentTypeReasoning:
+			if cp.Reasoning == "" {
+				continue
+			}
+			if modelParts == nil {
+				modelParts = make([]any, 0, len(msg.Content)+len(msg.ToolCalls))
+			}
+			part := map[string]any{"text": cp.Reasoning, "thought": true}
+			if isValidThoughtSignature(cp.ThoughtSignature) {
+				part["thoughtSignature"] = string(cp.ThoughtSignature)
+				lastThoughtSig = cp.ThoughtSignature
 				if debugToolCalls {
-					log.Debugf("gemini: TOOL CALL IDs: %v", toolCallIDs)
-				}
-
-				for _, tcID := range toolCallIDs {
-					name, ok := toolCallIDToName[tcID]
-					if !ok {
-						continue
-					}
-					resultPart, hasResult := toolResults[tcID]
-					if !hasResult {
-						continue
-					}
-
-					funcResp := map[string]any{
-						"name": name,
-						"id":   tcID,
-					}
-					funcResp["response"] = buildFunctionResponseObject(resultPart.Result, resultPart.IsError)
-					responseParts = append(responseParts, map[string]any{
-						"functionResponse": funcResp,
-					})
-
-					// Add inlineData parts for images attached to this tool result
-					if len(resultPart.Images) > 0 {
-						for _, img := range resultPart.Images {
-							if img.Data != "" {
-								// Inline data (base64 encoded)
-								responseParts = append(responseParts, map[string]any{
-									"inlineData": map[string]any{
-										"mimeType": img.MimeType,
-										"data":     img.Data,
-									},
-								})
-							} else if img.URL != "" {
-								// File data (URI reference)
-								responseParts = append(responseParts, map[string]any{
-									"fileData": map[string]any{
-										"fileUri":  img.URL,
-										"mimeType": img.MimeType,
-									},
-								})
-							}
-						}
-					}
+					log.Debugf("gemini: captured thinking signature (len=%d) for propagation", len(lastThoughtSig))
 				}
 			}
+			modelParts = append(modelParts, part)
 
-			if len(parts) > 0 {
-				contents = append(contents, map[string]any{
-					"role":  "model",
-					"parts": parts,
+		case ir.ContentTypeText:
+			if cp.Text == "" {
+				continue
+			}
+			if modelParts == nil {
+				modelParts = make([]any, 0, len(msg.Content)+len(msg.ToolCalls))
+			}
+			part := map[string]any{"text": cp.Text}
+			if isValidThoughtSignature(cp.ThoughtSignature) {
+				part["thoughtSignature"] = string(cp.ThoughtSignature)
+			}
+			modelParts = append(modelParts, part)
+		}
+	}
+
+	if len(msg.ToolCalls) == 0 {
+		return modelParts, nil
+	}
+
+	if modelParts == nil {
+		modelParts = make([]any, 0, len(msg.ToolCalls))
+	}
+
+	for i := range msg.ToolCalls {
+		tc := &msg.ToolCalls[i]
+
+		toolID := tc.ID
+		if toolID == "" {
+			toolID = fmt.Sprintf("call_%d_%d", time.Now().UnixNano(), i)
+		}
+
+		fcMap := map[string]any{
+			"name": tc.Name,
+			"args": json.RawMessage(ir.ValidateAndNormalizeJSON(tc.Args)),
+			"id":   toolID,
+		}
+		part := map[string]any{"functionCall": fcMap}
+
+		if len(tc.ThoughtSignature) > 0 {
+			part["thoughtSignature"] = string(tc.ThoughtSignature)
+		} else if len(lastThoughtSig) > 0 {
+			part["thoughtSignature"] = string(lastThoughtSig)
+		}
+		modelParts = append(modelParts, part)
+
+		name, hasName := toolIDToName[toolID]
+		if !hasName {
+			continue
+		}
+		resultPart, hasResult := toolResults[toolID]
+		if !hasResult {
+			continue
+		}
+
+		if responseParts == nil {
+			responseParts = make([]any, 0, len(msg.ToolCalls)*2)
+		}
+
+		funcResp := map[string]any{
+			"name":     name,
+			"id":       toolID,
+			"response": buildFunctionResponseObject(resultPart.Result, resultPart.IsError),
+		}
+		responseParts = append(responseParts, map[string]any{"functionResponse": funcResp})
+
+		for _, img := range resultPart.Images {
+			if img.Data != "" {
+				responseParts = append(responseParts, map[string]any{
+					"inlineData": map[string]any{
+						"mimeType": img.MimeType,
+						"data":     img.Data,
+					},
 				})
-			}
-
-			if len(responseParts) > 0 {
-				contents = append(contents, map[string]any{
-					"role":  "user",
-					"parts": responseParts,
+			} else if img.URL != "" {
+				responseParts = append(responseParts, map[string]any{
+					"fileData": map[string]any{
+						"fileUri":  img.URL,
+						"mimeType": img.MimeType,
+					},
 				})
 			}
 		}
 	}
 
-	if len(contents) > 0 {
-		root["contents"] = contents
-	}
-	return nil
+	return modelParts, responseParts
 }
 
 // applyTools converts tool definitions to Gemini functionDeclarations format.

@@ -38,7 +38,7 @@ graph LR
     end
     
     subgraph "llm-mux :8318"
-        E[OpenAI API Format]
+        E[IR Translator]
     end
     
     subgraph "Your Subscriptions"
@@ -396,7 +396,7 @@ gemini-api-key:
 │                   (Cursor, Aider, Python, etc.)                 │
 └─────────────────────────────────────────────────────────────────┘
                                │
-                               ▼ OpenAI API Format
+                               ▼ Intermediate Representation (IR)
 ┌─────────────────────────────────────────────────────────────────┐
 │                         llm-mux :8318                           │
 │  ┌─────────────┐    ┌──────────────┐    ┌──────────────────┐   │

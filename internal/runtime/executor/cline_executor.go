@@ -151,6 +151,7 @@ func (e *ClineExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		result := HandleHTTPError(httpResp, "cline executor")
+		_ = httpResp.Body.Close()
 		return nil, result.Error
 	}
 

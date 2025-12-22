@@ -156,6 +156,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	}
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		result := HandleHTTPError(httpResp, "openai-compat executor")
+		_ = httpResp.Body.Close()
 		return nil, result.Error
 	}
 	out := make(chan cliproxyexecutor.StreamChunk)

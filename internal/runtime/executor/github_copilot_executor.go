@@ -153,6 +153,7 @@ func (e *GitHubCopilotExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 
 	if !isHTTPSuccessCode(httpResp.StatusCode) {
 		result := HandleHTTPError(httpResp, "github-copilot executor")
+		_ = httpResp.Body.Close()
 		return nil, result.Error
 	}
 

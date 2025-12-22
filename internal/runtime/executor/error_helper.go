@@ -17,8 +17,10 @@ type HTTPErrorResult struct {
 	Body       []byte
 }
 
-// HandleHTTPError reads error response body, closes the response, and returns categorized error.
-// This ensures consistent error handling across all executor implementations.
+// HandleHTTPError reads error response body and returns categorized error.
+// NOTE: This function does NOT close the response body. The caller is responsible
+// for closing the body (typically via defer). This avoids double-close bugs when
+// callers already have defer resp.Body.Close() set up.
 //
 // Parameters:
 //   - resp: HTTP response to handle
@@ -29,13 +31,9 @@ type HTTPErrorResult struct {
 //
 // All executors should use this function instead of manual error handling to ensure:
 // - Consistent error categorization
-// - Proper body cleanup
 // - Standardized logging
 func HandleHTTPError(resp *http.Response, executorName string) HTTPErrorResult {
 	body, readErr := io.ReadAll(resp.Body)
-	if errClose := resp.Body.Close(); errClose != nil {
-		log.Errorf("%s: close response body error: %v", executorName, errClose)
-	}
 
 	// Handle read errors (rare but possible)
 	if readErr != nil {

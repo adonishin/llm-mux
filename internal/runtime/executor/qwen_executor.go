@@ -132,6 +132,7 @@ func (e *QwenExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 	}
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		result := HandleHTTPError(httpResp, "qwen executor")
+		_ = httpResp.Body.Close()
 		return nil, result.Error
 	}
 	out := make(chan cliproxyexecutor.StreamChunk)

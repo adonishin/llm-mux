@@ -403,6 +403,7 @@ func (e *GeminiVertexExecutor) executeStreamWithServiceAccount(ctx context.Conte
 	}
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		result := HandleHTTPError(httpResp, "gemini-vertex executor")
+		_ = httpResp.Body.Close()
 		return nil, result.Error
 	}
 
@@ -500,6 +501,7 @@ func (e *GeminiVertexExecutor) executeStreamWithAPIKey(ctx context.Context, auth
 	}
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		result := HandleHTTPError(httpResp, "gemini-vertex executor")
+		_ = httpResp.Body.Close()
 		return nil, result.Error
 	}
 

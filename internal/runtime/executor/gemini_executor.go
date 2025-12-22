@@ -204,6 +204,7 @@ func (e *GeminiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	}
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		result := HandleHTTPError(httpResp, "gemini executor")
+		_ = httpResp.Body.Close()
 		return nil, result.Error
 	}
 	out := make(chan cliproxyexecutor.StreamChunk)

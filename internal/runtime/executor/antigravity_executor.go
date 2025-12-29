@@ -17,8 +17,6 @@ import (
 	"github.com/nghyane/llm-mux/internal/config"
 	"github.com/nghyane/llm-mux/internal/oauth"
 	"github.com/nghyane/llm-mux/internal/registry"
-	"github.com/nghyane/llm-mux/internal/translator/from_ir"
-	"github.com/nghyane/llm-mux/internal/translator/ir"
 	"github.com/nghyane/llm-mux/internal/util"
 
 	cliproxyauth "github.com/nghyane/llm-mux/sdk/cliproxy/auth"
@@ -76,43 +74,6 @@ func (e *AntigravityExecutor) Identifier() string { return antigravityAuthType }
 func (e *AntigravityExecutor) PrepareRequest(_ *http.Request, _ *cliproxyauth.Auth) error { return nil }
 
 // =============================================================================
-// Antigravity Stream Processor (implements StreamProcessor interface)
-// =============================================================================
-
-// antigravityStreamProcessor processes Antigravity SSE stream lines.
-type antigravityStreamProcessor struct {
-	translator *StreamTranslator
-}
-
-// ProcessLine implements StreamProcessor.ProcessLine for Antigravity streams.
-func (p *antigravityStreamProcessor) ProcessLine(payload []byte) ([][]byte, *ir.Usage, error) {
-	// Parse Gemini CLI chunk to IR events
-	var events []ir.UnifiedEvent
-	var err error
-	if p.translator.ctx.ToolSchemaCtx != nil {
-		events, err = (&from_ir.GeminiCLIProvider{}).ParseStreamChunkWithContext(payload, p.translator.ctx.ToolSchemaCtx)
-	} else {
-		events, err = (&from_ir.GeminiCLIProvider{}).ParseStreamChunk(payload)
-	}
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to parse chunk: %w", err)
-	}
-	if len(events) == 0 {
-		return nil, nil, nil
-	}
-
-	result, err := p.translator.Translate(events)
-	if err != nil {
-		return nil, nil, err
-	}
-	return result.Chunks, result.Usage, nil
-}
-
-// ProcessDone implements StreamProcessor.ProcessDone - flushes any pending chunks.
-func (p *antigravityStreamProcessor) ProcessDone() ([][]byte, error) {
-	return p.translator.Flush(), nil
-}
-
 // =============================================================================
 // Execute Method (Non-Streaming) - Uses RetryHandler
 // =============================================================================
@@ -349,9 +310,7 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 		messageID := "chatcmpl-" + req.Model
 
 		translator := NewStreamTranslator(e.cfg, from, from.String(), req.Model, messageID, streamCtx)
-		processor := &antigravityStreamProcessor{
-			translator: translator,
-		}
+		processor := NewGeminiCLIStreamProcessor(translator)
 
 		stream = RunSSEStream(ctx, httpResp.Body, reporter, processor, StreamConfig{
 			ExecutorName:    "antigravity",

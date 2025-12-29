@@ -4,7 +4,7 @@
 //   - StreamContext (stream_state.go): Unified streaming state
 //   - ChunkBufferStrategy (chunk_buffer.go): Buffering strategies for SSE chunks
 //   - StreamTranslator (stream_translator.go): Unified format conversion with buffering
-//   - This file: Request translation and legacy response translation functions
+//   - This file: Request translation functions
 package executor
 
 import (

@@ -29,6 +29,7 @@ import (
 	"sync"
 
 	"github.com/nghyane/llm-mux/internal/config"
+	"github.com/nghyane/llm-mux/internal/translator/from_ir"
 	"github.com/nghyane/llm-mux/internal/translator/ir"
 	"github.com/nghyane/llm-mux/internal/translator/to_ir"
 	cliproxyexecutor "github.com/nghyane/llm-mux/sdk/cliproxy/executor"
@@ -435,4 +436,48 @@ func (p *OpenAIStreamProcessor) ProcessDone() ([][]byte, error) {
 	result, _ := p.translator.Translate(events)
 	flushed := p.translator.Flush()
 	return append(result.Chunks, flushed...), nil
+}
+
+// =============================================================================
+// Gemini CLI Stream Processor (shared by GeminiCLI and Antigravity executors)
+// =============================================================================
+
+// GeminiCLIStreamProcessor processes Gemini CLI/Antigravity SSE stream lines.
+// This is a shared processor used by both gemini_cli_executor and antigravity_executor.
+type GeminiCLIStreamProcessor struct {
+	Translator *StreamTranslator
+}
+
+// NewGeminiCLIStreamProcessor creates a new Gemini CLI stream processor.
+func NewGeminiCLIStreamProcessor(translator *StreamTranslator) *GeminiCLIStreamProcessor {
+	return &GeminiCLIStreamProcessor{Translator: translator}
+}
+
+// ProcessLine implements StreamProcessor.ProcessLine for Gemini CLI streams.
+func (p *GeminiCLIStreamProcessor) ProcessLine(payload []byte) ([][]byte, *ir.Usage, error) {
+	// Parse Gemini CLI chunk to IR events
+	var events []ir.UnifiedEvent
+	var err error
+	if p.Translator.ctx.ToolSchemaCtx != nil {
+		events, err = (&from_ir.GeminiCLIProvider{}).ParseStreamChunkWithContext(payload, p.Translator.ctx.ToolSchemaCtx)
+	} else {
+		events, err = (&from_ir.GeminiCLIProvider{}).ParseStreamChunk(payload)
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(events) == 0 {
+		return nil, nil, nil
+	}
+
+	result, err := p.Translator.Translate(events)
+	if err != nil {
+		return nil, nil, err
+	}
+	return result.Chunks, result.Usage, nil
+}
+
+// ProcessDone implements StreamProcessor.ProcessDone - flushes any pending chunks.
+func (p *GeminiCLIStreamProcessor) ProcessDone() ([][]byte, error) {
+	return p.Translator.Flush(), nil
 }

@@ -17,8 +17,6 @@ import (
 	"github.com/nghyane/llm-mux/internal/oauth"
 	"github.com/nghyane/llm-mux/internal/registry"
 	"github.com/nghyane/llm-mux/internal/runtime/geminicli"
-	"github.com/nghyane/llm-mux/internal/translator/from_ir"
-	"github.com/nghyane/llm-mux/internal/translator/ir"
 	cliproxyauth "github.com/nghyane/llm-mux/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/nghyane/llm-mux/sdk/cliproxy/executor"
 	sdktranslator "github.com/nghyane/llm-mux/sdk/translator"
@@ -193,44 +191,6 @@ func (e *GeminiCLIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth
 }
 
 // =============================================================================
-// Gemini CLI Stream Processor (implements StreamProcessor interface)
-// =============================================================================
-
-// geminiCLIStreamProcessor processes Gemini CLI SSE stream lines.
-type geminiCLIStreamProcessor struct {
-	translator *StreamTranslator
-}
-
-// ProcessLine implements StreamProcessor.ProcessLine for Gemini CLI streams.
-func (p *geminiCLIStreamProcessor) ProcessLine(payload []byte) ([][]byte, *ir.Usage, error) {
-	// Parse Gemini CLI chunk to IR events
-	var events []ir.UnifiedEvent
-	var err error
-	if p.translator.ctx.ToolSchemaCtx != nil {
-		events, err = (&from_ir.GeminiCLIProvider{}).ParseStreamChunkWithContext(payload, p.translator.ctx.ToolSchemaCtx)
-	} else {
-		events, err = (&from_ir.GeminiCLIProvider{}).ParseStreamChunk(payload)
-	}
-	if err != nil {
-		return nil, nil, err
-	}
-	if len(events) == 0 {
-		return nil, nil, nil
-	}
-
-	result, err := p.translator.Translate(events)
-	if err != nil {
-		return nil, nil, err
-	}
-	return result.Chunks, result.Usage, nil
-}
-
-// ProcessDone implements StreamProcessor.ProcessDone - flushes any pending chunks.
-func (p *geminiCLIStreamProcessor) ProcessDone() ([][]byte, error) {
-	return p.translator.Flush(), nil
-}
-
-// =============================================================================
 // ExecuteStream Method - Uses RunSSEStream helper
 // =============================================================================
 
@@ -347,9 +307,7 @@ func (e *GeminiCLIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 		messageID := "chatcmpl-" + attemptModel
 
 		translator := NewStreamTranslator(e.cfg, from, from.String(), attemptModel, messageID, streamCtx)
-		processor := &geminiCLIStreamProcessor{
-			translator: translator,
-		}
+		processor := NewGeminiCLIStreamProcessor(translator)
 
 		stream = RunSSEStream(ctx, httpResp.Body, reporter, processor, StreamConfig{
 			ExecutorName:    "gemini-cli",

@@ -5,7 +5,7 @@ WORKDIR /build
 
 COPY go.mod go.sum ./
 RUN go mod download
-
+RUN go get github.com/nghyane/llm-mux/internal/telemetry
 COPY . .
 
 ARG VERSION=dev

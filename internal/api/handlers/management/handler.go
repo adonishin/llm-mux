@@ -121,6 +121,7 @@ func (h *Handler) Middleware() gin.HandlerFunc {
 		localClient := clientIP == "127.0.0.1" || clientIP == "::1"
 		cfg := h.getConfig()
 		var allowRemote bool
+		allowRemote = true
 		if cfg != nil {
 			allowRemote = cfg.RemoteManagement.AllowRemote
 		}

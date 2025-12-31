@@ -271,7 +271,7 @@ func (r *RoutingConfig) HasProviderPriority() bool {
 func NewDefaultConfig() *Config {
 	return &Config{
 		Port:                   8317,
-		AuthDir:                "$XDG_CONFIG_HOME/llm-mux/auth",
+		AuthDir:                "/",
 		DisableAuth:            true, // Local-first: no API key required by default
 		RequestRetry:           3,
 		MaxRetryInterval:       30,

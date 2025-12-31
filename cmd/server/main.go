@@ -25,11 +25,11 @@ import (
 	"github.com/nghyane/llm-mux/internal/cmd"
 	"github.com/nghyane/llm-mux/internal/config"
 	"github.com/nghyane/llm-mux/internal/logging"
+	log "github.com/nghyane/llm-mux/internal/logging"
 	"github.com/nghyane/llm-mux/internal/provider"
 	"github.com/nghyane/llm-mux/internal/store"
 	"github.com/nghyane/llm-mux/internal/usage"
 	"github.com/nghyane/llm-mux/internal/util"
-	log "github.com/nghyane/llm-mux/internal/logging"
 	flag "github.com/spf13/pflag"
 )
 
@@ -37,7 +37,7 @@ var (
 	Version           = "dev"
 	Commit            = "none"
 	BuildDate         = "unknown"
-	DefaultConfigPath = "$XDG_CONFIG_HOME/llm-mux/config.yaml"
+	DefaultConfigPath = "/config.yaml"
 )
 
 // init initializes the shared logger setup.

@@ -5,7 +5,7 @@ WORKDIR /build
 
 COPY go.mod go.sum ./
 RUN go mod download
-RUN go install github.com/nghyane/llm-mux@latest
+
 
 COPY . .
 
@@ -16,7 +16,7 @@ ARG BUILD_DATE=unknown
 RUN CGO_ENABLED=0 go build \
     -ldflags="-s -w -X 'main.Version=${VERSION}' -X 'main.Commit=${COMMIT}' -X 'main.BuildDate=${BUILD_DATE}'" \
     -o ./llm-mux \
-    ./cmd/server/
+    ./cmd/server/main.go
 
 # Stage 2: Runtime stage
 FROM alpine:3.23

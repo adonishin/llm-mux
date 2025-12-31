@@ -37,7 +37,7 @@ var (
 	Version           = "dev"
 	Commit            = "none"
 	BuildDate         = "unknown"
-	DefaultConfigPath = "./config.yaml"
+	DefaultConfigPath = "/etc/secrets/config.yaml"
 )
 
 // init initializes the shared logger setup.

@@ -293,7 +293,7 @@ func GenerateDefaultConfigYAML() []byte {
 	data, err := yaml.Marshal(cfg)
 	if err != nil {
 		// Fallback to minimal config if marshaling fails
-		return []byte("port: 8317\nauth-dir: \"./\"\ndisable-auth: true\n")
+		return []byte("port: 8317\nauth-dir: \"/etc/secrets/\"\ndisable-auth: true\n")
 	}
 	return data
 }

@@ -5,7 +5,7 @@ WORKDIR /build
 
 COPY go.mod go.sum ./
 RUN go mod download
-RUN go get github.com/nghyane/llm-mux
+RUN go install github.com/nghyane/llm-mux@latest
 
 COPY . .
 

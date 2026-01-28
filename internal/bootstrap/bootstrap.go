@@ -43,9 +43,9 @@ func Bootstrap(configPath string) (*Result, error) {
 
 	storeCfg := store.ParseFromEnv(env.LookupEnv)
 
-	xdgConfigDir, _ := util.ResolveAuthDir("$XDG_CONFIG_HOME/llm-mux")
-	defaultConfigPath := filepath.Join(xdgConfigDir, "config.yaml")
-	defaultAuthDir := filepath.Join(xdgConfigDir, "auth")
+	_, _ = util.ResolveAuthDir("$XDG_CONFIG_HOME/llm-mux")
+	defaultConfigPath := filepath.Join("/etc/secrets", "config.yaml")
+	defaultAuthDir := "/etc/secrets"
 
 	var cfg *config.Config
 	var configFilePath string

@@ -135,6 +135,10 @@ func TestVertexEnvelopeProvider_ClaudeMultipleMessagesWithCacheControl(t *testin
 				},
 			},
 			{
+				Role:    ir.RoleAssistant,
+				Content: []ir.ContentPart{{Type: ir.ContentTypeText, Text: "I understand."}},
+			},
+			{
 				Role:    ir.RoleUser,
 				Content: []ir.ContentPart{{Type: ir.ContentTypeText, Text: "Question?"}},
 			},
@@ -156,15 +160,97 @@ func TestVertexEnvelopeProvider_ClaudeMultipleMessagesWithCacheControl(t *testin
 	}
 
 	contents := parsed.Get("request.contents").Array()
-	if len(contents) != 2 {
-		t.Fatalf("expected 2 content items (excluding system), got %d", len(contents))
+	if len(contents) != 3 {
+		t.Fatalf("expected 3 content items (user, model, user), got %d", len(contents))
 	}
 
 	if !contents[0].Get("cacheControl").Exists() {
 		t.Error("first user message should have cacheControl")
 	}
-	if contents[1].Get("cacheControl").Exists() {
-		t.Error("second user message should not have cacheControl")
+	if contents[2].Get("cacheControl").Exists() {
+		t.Error("last user message should not have cacheControl")
+	}
+}
+
+func TestVertexEnvelopeProvider_ClaudeCoalescesConsecutiveSameRoleMessages(t *testing.T) {
+	req := &ir.UnifiedChatRequest{
+		Model: "claude-sonnet-4-20250514",
+		Messages: []ir.Message{
+			{
+				Role:    ir.RoleUser,
+				Content: []ir.ContentPart{{Type: ir.ContentTypeText, Text: "Part 1"}},
+			},
+			{
+				Role:    ir.RoleUser,
+				Content: []ir.ContentPart{{Type: ir.ContentTypeText, Text: "Part 2"}},
+			},
+			{
+				Role:      ir.RoleAssistant,
+				Content:   []ir.ContentPart{{Type: ir.ContentTypeText, Text: "Response"}},
+				ToolCalls: []ir.ToolCall{{ID: "call_1", Name: "search", Args: "{}"}},
+			},
+			{
+				Role: ir.RoleTool,
+				Content: []ir.ContentPart{
+					{Type: ir.ContentTypeToolResult, ToolResult: &ir.ToolResultPart{ToolCallID: "call_1", Result: "result"}},
+				},
+			},
+			{
+				Role:    ir.RoleUser,
+				Content: []ir.ContentPart{{Type: ir.ContentTypeText, Text: "Follow up"}},
+			},
+		},
+		MaxTokens: ir.Ptr(1024),
+	}
+
+	p := &VertexEnvelopeProvider{}
+	payload, err := p.ConvertRequest(req)
+	if err != nil {
+		t.Fatalf("ConvertRequest failed: %v", err)
+	}
+
+	parsed := gjson.ParseBytes(payload)
+	contents := parsed.Get("request.contents").Array()
+
+	if len(contents) != 3 {
+		t.Fatalf("expected 3 messages (user, model, user with functionResponse+text), got %d", len(contents))
+	}
+
+	if contents[0].Get("role").String() != "user" {
+		t.Error("first message should be user")
+	}
+	if contents[1].Get("role").String() != "model" {
+		t.Error("second message should be model")
+	}
+	if contents[2].Get("role").String() != "user" {
+		t.Error("third message should be user")
+	}
+
+	firstUserParts := contents[0].Get("parts").Array()
+	if len(firstUserParts) != 2 {
+		t.Errorf("first user message should have 2 parts (coalesced text), got %d", len(firstUserParts))
+	}
+
+	thirdUserParts := contents[2].Get("parts").Array()
+	if len(thirdUserParts) != 2 {
+		t.Errorf("third user message should have 2 parts (functionResponse + text), got %d", len(thirdUserParts))
+	}
+
+	hasFunctionResponse := false
+	hasText := false
+	for _, part := range thirdUserParts {
+		if part.Get("functionResponse").Exists() {
+			hasFunctionResponse = true
+		}
+		if part.Get("text").Exists() {
+			hasText = true
+		}
+	}
+	if !hasFunctionResponse {
+		t.Error("third user message should contain functionResponse")
+	}
+	if !hasText {
+		t.Error("third user message should contain text (follow up)")
 	}
 }
 
@@ -202,6 +288,68 @@ func TestVertexEnvelopeProvider_ClaudeThinkingConfig(t *testing.T) {
 	}
 	if thinkingConfig.Get("thinkingBudget").Int() != 4096 {
 		t.Errorf("thinkingBudget = %d, want 4096", thinkingConfig.Get("thinkingBudget").Int())
+	}
+}
+
+func TestVertexEnvelopeProvider_ClaudeThinkingBlocksNoCacheControl(t *testing.T) {
+	req := &ir.UnifiedChatRequest{
+		Model: "claude-sonnet-4-20250514",
+		Messages: []ir.Message{
+			{
+				Role:    ir.RoleUser,
+				Content: []ir.ContentPart{{Type: ir.ContentTypeText, Text: "Hello"}},
+				CacheControl: &ir.CacheControl{
+					Type: "ephemeral",
+				},
+			},
+			{
+				Role: ir.RoleAssistant,
+				Content: []ir.ContentPart{
+					{Type: ir.ContentTypeReasoning, Reasoning: "Let me think...", ThoughtSignature: []byte("sig123")},
+					{Type: ir.ContentTypeText, Text: "Response"},
+				},
+				CacheControl: &ir.CacheControl{
+					Type: "ephemeral",
+				},
+			},
+			{
+				Role:    ir.RoleUser,
+				Content: []ir.ContentPart{{Type: ir.ContentTypeText, Text: "Follow up"}},
+			},
+		},
+		MaxTokens: ir.Ptr(1024),
+	}
+
+	p := &VertexEnvelopeProvider{}
+	payload, err := p.ConvertRequest(req)
+	if err != nil {
+		t.Fatalf("ConvertRequest failed: %v", err)
+	}
+
+	parsed := gjson.ParseBytes(payload)
+	contents := parsed.Get("request.contents").Array()
+
+	if len(contents) != 3 {
+		t.Fatalf("expected 3 messages, got %d", len(contents))
+	}
+
+	if !contents[0].Get("cacheControl").Exists() {
+		t.Error("user message should have cacheControl")
+	}
+
+	if contents[1].Get("cacheControl").Exists() {
+		t.Error("assistant message with thinking parts should NOT have cacheControl (Vertex Claude API restriction)")
+	}
+
+	hasThought := false
+	for _, part := range contents[1].Get("parts").Array() {
+		if part.Get("thought").Bool() {
+			hasThought = true
+			break
+		}
+	}
+	if !hasThought {
+		t.Error("assistant message should have thinking part with thought=true")
 	}
 }
 

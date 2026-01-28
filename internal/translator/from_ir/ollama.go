@@ -3,6 +3,7 @@ package from_ir
 import (
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/nghyane/llm-mux/internal/json"
@@ -10,6 +11,88 @@ import (
 	"github.com/nghyane/llm-mux/internal/translator/ir"
 	"github.com/nghyane/llm-mux/internal/translator/to_ir"
 )
+
+type ollamaChatChunk struct {
+	Model              string            `json:"model"`
+	CreatedAt          string            `json:"created_at"`
+	Done               bool              `json:"done"`
+	Message            ollamaChatMessage `json:"message"`
+	DoneReason         string            `json:"done_reason,omitempty"`
+	PromptEvalCount    int64             `json:"prompt_eval_count,omitempty"`
+	EvalCount          int64             `json:"eval_count,omitempty"`
+	TotalDuration      int64             `json:"total_duration,omitempty"`
+	LoadDuration       int64             `json:"load_duration,omitempty"`
+	PromptEvalDuration int64             `json:"prompt_eval_duration,omitempty"`
+	EvalDuration       int64             `json:"eval_duration,omitempty"`
+}
+
+type ollamaChatMessage struct {
+	Role      string           `json:"role"`
+	Content   string           `json:"content"`
+	Thinking  string           `json:"thinking,omitempty"`
+	ToolCalls []ollamaToolCall `json:"tool_calls,omitempty"`
+}
+
+type ollamaToolCall struct {
+	ID       string             `json:"id"`
+	Type     string             `json:"type"`
+	Function ollamaToolFunction `json:"function"`
+}
+
+type ollamaToolFunction struct {
+	Name      string `json:"name"`
+	Arguments string `json:"arguments"`
+}
+
+type ollamaGenerateChunk struct {
+	Model              string `json:"model"`
+	CreatedAt          string `json:"created_at"`
+	Done               bool   `json:"done"`
+	Response           string `json:"response"`
+	Thinking           string `json:"thinking,omitempty"`
+	DoneReason         string `json:"done_reason,omitempty"`
+	PromptEvalCount    int64  `json:"prompt_eval_count,omitempty"`
+	EvalCount          int64  `json:"eval_count,omitempty"`
+	TotalDuration      int64  `json:"total_duration,omitempty"`
+	LoadDuration       int64  `json:"load_duration,omitempty"`
+	PromptEvalDuration int64  `json:"prompt_eval_duration,omitempty"`
+	EvalDuration       int64  `json:"eval_duration,omitempty"`
+}
+
+var ollamaChatChunkPool = sync.Pool{
+	New: func() any {
+		return &ollamaChatChunk{Message: ollamaChatMessage{Role: "assistant"}}
+	},
+}
+
+var ollamaGenerateChunkPool = sync.Pool{
+	New: func() any {
+		return &ollamaGenerateChunk{}
+	},
+}
+
+func getOllamaChatChunk() *ollamaChatChunk {
+	return ollamaChatChunkPool.Get().(*ollamaChatChunk)
+}
+
+func putOllamaChatChunk(c *ollamaChatChunk) {
+	c.Model, c.CreatedAt, c.Done, c.DoneReason = "", "", false, ""
+	c.Message.Content, c.Message.Thinking, c.Message.ToolCalls = "", "", nil
+	c.PromptEvalCount, c.EvalCount = 0, 0
+	c.TotalDuration, c.LoadDuration, c.PromptEvalDuration, c.EvalDuration = 0, 0, 0, 0
+	ollamaChatChunkPool.Put(c)
+}
+
+func getOllamaGenerateChunk() *ollamaGenerateChunk {
+	return ollamaGenerateChunkPool.Get().(*ollamaGenerateChunk)
+}
+
+func putOllamaGenerateChunk(c *ollamaGenerateChunk) {
+	c.Model, c.CreatedAt, c.Done, c.Response, c.Thinking, c.DoneReason = "", "", false, "", "", ""
+	c.PromptEvalCount, c.EvalCount = 0, 0
+	c.TotalDuration, c.LoadDuration, c.PromptEvalDuration, c.EvalDuration = 0, 0, 0, 0
+	ollamaGenerateChunkPool.Put(c)
+}
 
 func ToOllamaRequest(req *ir.UnifiedChatRequest) ([]byte, error) {
 	if req.Metadata != nil {
@@ -23,6 +106,14 @@ func ToOllamaRequest(req *ir.UnifiedChatRequest) ([]byte, error) {
 func convertToOllamaChatRequest(req *ir.UnifiedChatRequest) ([]byte, error) {
 	m := map[string]any{"model": req.Model, "messages": []any{}, "stream": req.Metadata["stream"] == true, "options": buildOllamaOptions(req)}
 	for _, msg := range req.Messages {
+		if msg.Role == ir.RoleTool {
+			for _, p := range msg.Content {
+				if p.Type == ir.ContentTypeToolResult && p.ToolResult != nil {
+					m["messages"] = append(m["messages"].([]any), map[string]any{"role": "tool", "tool_call_id": p.ToolResult.ToolCallID, "content": p.ToolResult.Result})
+				}
+			}
+			continue
+		}
 		if mo := convertMessageToOllama(msg); mo != nil {
 			m["messages"] = append(m["messages"].([]any), mo)
 		}
@@ -124,8 +215,6 @@ func convertMessageToOllama(m ir.Message) map[string]any {
 		return buildOllamaUserMessage(m)
 	case ir.RoleAssistant:
 		return buildOllamaAssistantMessage(m)
-	case ir.RoleTool:
-		return buildOllamaToolMessage(m)
 	}
 	return nil
 }
@@ -175,15 +264,6 @@ func buildOllamaAssistantMessage(m ir.Message) map[string]any {
 	return res
 }
 
-func buildOllamaToolMessage(m ir.Message) map[string]any {
-	for _, p := range m.Content {
-		if p.Type == ir.ContentTypeToolResult && p.ToolResult != nil {
-			return map[string]any{"role": "tool", "tool_call_id": p.ToolResult.ToolCallID, "content": p.ToolResult.Result}
-		}
-	}
-	return nil
-}
-
 func ToOllamaChatResponse(ms []ir.Message, us *ir.Usage, model string) ([]byte, error) {
 	b := ir.NewResponseBuilder(ms, us, model, false)
 	res := map[string]any{"model": model, "created_at": time.Now().UTC().Format(time.RFC3339), "done": true, "message": map[string]any{"role": "assistant", "content": ""}}
@@ -229,26 +309,42 @@ func ToOllamaChatChunk(ev ir.UnifiedEvent, model string) ([]byte, error) {
 	if ev.Type == ir.EventTypeStreamMeta {
 		return nil, nil
 	}
-	res := map[string]any{"model": model, "created_at": time.Now().UTC().Format(time.RFC3339), "done": false, "message": map[string]any{"role": "assistant", "content": ""}}
+	if ev.Type == ir.EventTypeError {
+		return nil, fmt.Errorf("stream error: %s", ev.ErrorMessage())
+	}
+
+	c := getOllamaChatChunk()
+	defer putOllamaChatChunk(c)
+
+	c.Model = model
+	c.CreatedAt = time.Now().UTC().Format(time.RFC3339)
+
 	switch ev.Type {
 	case ir.EventTypeToken:
-		res["message"].(map[string]any)["content"] = ev.Content
+		c.Message.Content = ev.Content
 	case ir.EventTypeReasoning:
-		res["message"].(map[string]any)["thinking"] = ev.Reasoning
+		c.Message.Thinking = ev.Reasoning
 	case ir.EventTypeToolCall:
 		if ev.ToolCall != nil {
-			res["message"].(map[string]any)["tool_calls"] = []any{map[string]any{"id": ev.ToolCall.ID, "type": "function", "function": map[string]any{"name": ev.ToolCall.Name, "arguments": ev.ToolCall.Args}}}
+			c.Message.ToolCalls = []ollamaToolCall{{
+				ID:   ev.ToolCall.ID,
+				Type: "function",
+				Function: ollamaToolFunction{
+					Name:      ev.ToolCall.Name,
+					Arguments: ev.ToolCall.Args,
+				},
+			}}
 		}
 	case ir.EventTypeFinish:
-		res["done"], res["done_reason"] = true, mapFinishReasonToOllama(ev.FinishReason)
+		c.Done = true
+		c.DoneReason = mapFinishReasonToOllama(ev.FinishReason)
 		if ev.Usage != nil {
-			res["prompt_eval_count"], res["eval_count"] = ev.Usage.PromptTokens, ev.Usage.CompletionTokens
-			res["total_duration"], res["load_duration"], res["prompt_eval_duration"], res["eval_duration"] = 0, 0, 0, 0
+			c.PromptEvalCount = ev.Usage.PromptTokens
+			c.EvalCount = ev.Usage.CompletionTokens
 		}
-	case ir.EventTypeError:
-		return nil, fmt.Errorf("stream error: %v", ev.Error)
 	}
-	jb, _ := json.Marshal(res)
+
+	jb, _ := json.Marshal(c)
 	return append(jb, '\n'), nil
 }
 
@@ -256,22 +352,31 @@ func ToOllamaGenerateChunk(ev ir.UnifiedEvent, model string) ([]byte, error) {
 	if ev.Type == ir.EventTypeStreamMeta {
 		return nil, nil
 	}
-	res := map[string]any{"model": model, "created_at": time.Now().UTC().Format(time.RFC3339), "done": false, "response": ""}
+	if ev.Type == ir.EventTypeError {
+		return nil, fmt.Errorf("stream error: %s", ev.ErrorMessage())
+	}
+
+	c := getOllamaGenerateChunk()
+	defer putOllamaGenerateChunk(c)
+
+	c.Model = model
+	c.CreatedAt = time.Now().UTC().Format(time.RFC3339)
+
 	switch ev.Type {
 	case ir.EventTypeToken:
-		res["response"] = ev.Content
+		c.Response = ev.Content
 	case ir.EventTypeReasoning:
-		res["thinking"] = ev.Reasoning
+		c.Thinking = ev.Reasoning
 	case ir.EventTypeFinish:
-		res["done"], res["done_reason"] = true, mapFinishReasonToOllama(ev.FinishReason)
+		c.Done = true
+		c.DoneReason = mapFinishReasonToOllama(ev.FinishReason)
 		if ev.Usage != nil {
-			res["prompt_eval_count"], res["eval_count"] = ev.Usage.PromptTokens, ev.Usage.CompletionTokens
-			res["total_duration"], res["load_duration"], res["prompt_eval_duration"], res["eval_duration"] = 0, 0, 0, 0
+			c.PromptEvalCount = ev.Usage.PromptTokens
+			c.EvalCount = ev.Usage.CompletionTokens
 		}
-	case ir.EventTypeError:
-		return nil, fmt.Errorf("stream error: %v", ev.Error)
 	}
-	jb, _ := json.Marshal(res)
+
+	jb, _ := json.Marshal(c)
 	return append(jb, '\n'), nil
 }
 

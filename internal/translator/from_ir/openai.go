@@ -540,20 +540,6 @@ func ToOpenAIChunk(ev ir.UnifiedEvent, model, mid string, ci int) ([]byte, error
 	return ToOpenAIChunkMeta(ev, model, mid, ci, nil)
 }
 
-type openaiTextChunk struct {
-	ID      string `json:"id"`
-	Object  string `json:"object"`
-	Created int64  `json:"created"`
-	Model   string `json:"model"`
-	Choices []struct {
-		Index int `json:"index"`
-		Delta struct {
-			Role    string `json:"role,omitempty"`
-			Content string `json:"content,omitempty"`
-		} `json:"delta"`
-	} `json:"choices"`
-}
-
 func ToOpenAIChunkMeta(ev ir.UnifiedEvent, model, mid string, ci int, meta *ir.OpenAIMeta) ([]byte, error) {
 	if ev.Type == ir.EventTypeStreamMeta {
 		return nil, nil
@@ -567,17 +553,25 @@ func ToOpenAIChunkMeta(ev ir.UnifiedEvent, model, mid string, ci int, meta *ir.O
 			cr = meta.CreateTime
 		}
 	}
+	// HOT PATH: Simple text delta - use pooled struct for zero-allocation
 	if ev.Type == ir.EventTypeToken && ev.Content != "" && ev.Refusal == "" && ev.Logprobs == nil && ev.SystemFingerprint == "" {
-		ch := openaiTextChunk{ID: rid, Object: "chat.completion.chunk", Created: cr, Model: model, Choices: make([]struct {
-			Index int `json:"index"`
-			Delta struct {
-				Role    string `json:"role,omitempty"`
-				Content string `json:"content,omitempty"`
-			} `json:"delta"`
-		}, 1)}
-		ch.Choices[0].Delta.Role, ch.Choices[0].Delta.Content = "assistant", ev.Content
-		jb, _ := json.Marshal(ch)
-		return ir.BuildSSEChunk(jb), nil
+		return ir.BuildOpenAITextDeltaSSE(rid, model, cr, ev.Content), nil
+	}
+	// HOT PATH: Reasoning delta - use pooled struct
+	if ev.Type == ir.EventTypeReasoning && ev.Reasoning != "" {
+		return ir.BuildOpenAIReasoningDeltaSSE(rid, model, cr, ev.Reasoning, string(ev.ThoughtSignature)), nil
+	}
+	// HOT PATH: Tool call delta - use pooled struct for zero-allocation
+	if ev.Type == ir.EventTypeToolCall && ev.ToolCall != nil {
+		ts := ev.ThoughtSignature
+		if len(ts) == 0 {
+			ts = ev.ToolCall.ThoughtSignature
+		}
+		return ir.BuildOpenAIToolCallDeltaSSE(rid, model, cr, ci, ev.ToolCall.ID, ev.ToolCall.Name, ev.ToolCall.Args, ts), nil
+	}
+	// HOT PATH: Tool call args delta (streaming args) - use pooled struct
+	if ev.Type == ir.EventTypeToolCallDelta && ev.ToolCall != nil {
+		return ir.BuildOpenAIToolCallArgsDeltaSSE(rid, model, cr, ci, ev.ToolCall.Args), nil
 	}
 	ch := map[string]any{"id": rid, "object": "chat.completion.chunk", "created": cr, "model": model, "choices": []any{}}
 	if ev.SystemFingerprint != "" {
@@ -652,7 +646,7 @@ func ToOpenAIChunkMeta(ev ir.UnifiedEvent, model, mid string, ci int, meta *ir.O
 			ch["grounding_metadata"] = buildOpenAIGroundingMetadata(ev.GroundingMetadata)
 		}
 	case ir.EventTypeError:
-		return nil, fmt.Errorf("stream error: %v", ev.Error)
+		return nil, fmt.Errorf("stream error: %s", ev.ErrorMessage())
 	}
 	if ev.Logprobs != nil && ev.Type != ir.EventTypeFinish {
 		c["logprobs"] = ev.Logprobs
@@ -673,8 +667,7 @@ func convertMessageToOpenAI(msg ir.Message) map[string]any {
 		res = buildOpenAIUserMessage(msg)
 	case ir.RoleAssistant:
 		res = buildOpenAIAssistantMessage(msg)
-	case ir.RoleTool:
-		res = buildOpenAIToolMessage(msg)
+
 	}
 	if res != nil && msg.CacheControl != nil {
 		cc := map[string]any{"type": msg.CacheControl.Type}
@@ -745,15 +738,6 @@ func buildOpenAIAssistantMessage(msg ir.Message) map[string]any {
 		res["refusal"] = msg.Refusal
 	}
 	return res
-}
-
-func buildOpenAIToolMessage(msg ir.Message) map[string]any {
-	for _, p := range msg.Content {
-		if p.Type == ir.ContentTypeToolResult && p.ToolResult != nil {
-			return map[string]any{"role": "tool", "tool_call_id": p.ToolResult.ToolCallID, "content": p.ToolResult.Result}
-		}
-	}
-	return nil
 }
 
 func ToResponsesAPIResponse(ms []ir.Message, us *ir.Usage, model string, meta *ir.OpenAIMeta) ([]byte, error) {
@@ -843,23 +827,24 @@ type ResponsesStreamState struct {
 	FuncArgsBuffer  map[int]*strings.Builder
 }
 
+// NewResponsesStreamState creates a new ResponsesStreamState with pre-allocated buffers.
+// Pre-allocation reduces memory allocations during streaming with large context.
 func NewResponsesStreamState() *ResponsesStreamState {
-	return &ResponsesStreamState{FuncCallIDs: make(map[int]string), FuncNames: make(map[int]string), FuncArgsBuffer: make(map[int]*strings.Builder)}
+	s := &ResponsesStreamState{
+		FuncCallIDs:    make(map[int]string, 4),
+		FuncNames:      make(map[int]string, 4),
+		FuncArgsBuffer: make(map[int]*strings.Builder, 4),
+	}
+	// Pre-allocate text buffer for typical response sizes (16KB)
+	s.TextBuffer.Grow(16 * 1024)
+	// Pre-allocate reasoning buffer for models with reasoning (8KB)
+	s.ReasoningBuffer.Grow(8 * 1024)
+	return s
 }
 
-func formatResponsesSSE(et string, jb []byte) string {
-	b := ir.GetStringBuilder()
-	defer ir.PutStringBuilder(b)
-	b.Grow(16 + len(et) + len(jb))
-	b.WriteString("event: ")
-	b.WriteString(et)
-	b.WriteString("\ndata: ")
-	b.Write(jb)
-	b.WriteString("\n\n")
-	return b.String()
-}
-
-func ToResponsesAPIChunk(ev ir.UnifiedEvent, model string, s *ResponsesStreamState) ([]string, error) {
+// ToResponsesAPIChunk converts a unified event to Responses API SSE chunks.
+// Returns [][]byte for consistency and zero-copy writes to response writer.
+func ToResponsesAPIChunk(ev ir.UnifiedEvent, model string, s *ResponsesStreamState) ([][]byte, error) {
 	if ev.Type == ir.EventTypeStreamMeta {
 		return nil, nil
 	}
@@ -867,26 +852,22 @@ func ToResponsesAPIChunk(ev ir.UnifiedEvent, model string, s *ResponsesStreamSta
 		s.ResponseID, s.Created = fmt.Sprintf("resp_%d", time.Now().UnixNano()), time.Now().Unix()
 	}
 	ns := func() int { s.Seq++; return s.Seq }
-	out := make([]string, 0, 4)
+	out := make([][]byte, 0, 4)
 	if !s.Started {
-		for _, t := range []string{"response.created", "response.in_progress"} {
-			b, _ := json.Marshal(map[string]any{"type": t, "sequence_number": ns(), "response": map[string]any{"id": s.ResponseID, "object": "response", "created_at": s.Created, "status": "in_progress"}})
-			out = append(out, formatResponsesSSE(t, b))
-		}
+		out = append(out, ir.BuildResponsesResponseEventSSE("response.created", ns(), s.ResponseID, s.Created, "in_progress"))
+		out = append(out, ir.BuildResponsesResponseEventSSE("response.in_progress", ns(), s.ResponseID, s.Created, "in_progress"))
 		s.Started = true
 	}
 	switch ev.Type {
 	case ir.EventTypeToken:
 		if s.MsgID == "" {
 			s.MsgID = fmt.Sprintf("msg_%s", s.ResponseID)
-			b1, _ := json.Marshal(map[string]any{"type": "response.output_item.added", "sequence_number": ns(), "output_index": 0, "item": map[string]any{"id": s.MsgID, "type": "message", "status": "in_progress", "role": "assistant", "content": []any{}}})
-			out = append(out, formatResponsesSSE("response.output_item.added", b1))
-			b2, _ := json.Marshal(map[string]any{"type": "response.content_part.added", "sequence_number": ns(), "item_id": s.MsgID, "output_index": 0, "content_index": 0, "part": map[string]any{"type": "output_text", "text": ""}})
-			out = append(out, formatResponsesSSE("response.content_part.added", b2))
+			out = append(out, ir.BuildResponsesOutputItemAddedMessageSSE(ns(), 0, s.MsgID, "in_progress"))
+			out = append(out, ir.BuildResponsesContentPartAddedSSE(ns(), s.MsgID, 0, 0))
 		}
 		s.TextBuffer.WriteString(ev.Content)
-		b, _ := json.Marshal(map[string]any{"type": "response.output_text.delta", "sequence_number": ns(), "item_id": s.MsgID, "output_index": 0, "content_index": 0, "delta": ev.Content})
-		out = append(out, formatResponsesSSE("response.output_text.delta", b))
+		// HOT PATH: Use pooled struct for text delta
+		out = append(out, ir.BuildResponsesTextDeltaSSE(ns(), s.MsgID, ev.Content))
 	case ir.EventTypeReasoning, ir.EventTypeReasoningSummary:
 		t := ev.Reasoning
 		if ev.Type == ir.EventTypeReasoningSummary {
@@ -894,53 +875,48 @@ func ToResponsesAPIChunk(ev ir.UnifiedEvent, model string, s *ResponsesStreamSta
 		}
 		if s.ReasoningID == "" {
 			s.ReasoningID = fmt.Sprintf("rs_%s", s.ResponseID)
-			b, _ := json.Marshal(map[string]any{"type": "response.output_item.added", "sequence_number": ns(), "output_index": 0, "item": map[string]any{"id": s.ReasoningID, "type": "reasoning", "status": "in_progress", "summary": []any{}}})
-			out = append(out, formatResponsesSSE("response.output_item.added", b))
+			out = append(out, ir.BuildResponsesOutputItemAddedReasoningSSE(ns(), 0, s.ReasoningID, "in_progress"))
 		}
 		s.ReasoningBuffer.WriteString(t)
-		b, _ := json.Marshal(map[string]any{"type": "response.reasoning_summary_text.delta", "sequence_number": ns(), "item_id": s.ReasoningID, "output_index": 0, "content_index": 0, "delta": t})
-		out = append(out, formatResponsesSSE("response.reasoning_summary_text.delta", b))
+		// HOT PATH: Use pooled struct for reasoning delta
+		out = append(out, ir.BuildResponsesReasoningDeltaSSE(ns(), s.ReasoningID, t))
 	case ir.EventTypeToolCall:
 		idx := ev.ToolCallIndex
 		if _, ok := s.FuncCallIDs[idx]; !ok {
 			s.FuncCallIDs[idx], s.FuncNames[idx] = fmt.Sprintf("fc_%s", ev.ToolCall.ID), ev.ToolCall.Name
-			b, _ := json.Marshal(map[string]any{"type": "response.output_item.added", "sequence_number": ns(), "output_index": idx, "item": map[string]any{"id": s.FuncCallIDs[idx], "type": "function_call", "status": "in_progress", "call_id": ev.ToolCall.ID, "name": ev.ToolCall.Name, "arguments": ""}})
-			out = append(out, formatResponsesSSE("response.output_item.added", b))
+			out = append(out, ir.BuildResponsesOutputItemAddedFunctionCallSSE(ns(), idx, s.FuncCallIDs[idx], ev.ToolCall.ID, ev.ToolCall.Name, "in_progress"))
 		}
 		if ev.ToolCall.Args != "" {
-			b, _ := json.Marshal(map[string]any{"type": "response.function_call_arguments.delta", "sequence_number": ns(), "item_id": s.FuncCallIDs[idx], "output_index": idx, "delta": ev.ToolCall.Args})
-			out = append(out, formatResponsesSSE("response.function_call_arguments.delta", b))
+			out = append(out, ir.BuildResponsesFunctionCallArgsDeltaSSE(ns(), s.FuncCallIDs[idx], idx, ev.ToolCall.Args))
 		}
-		b, _ := json.Marshal(map[string]any{"type": "response.output_item.done", "sequence_number": ns(), "item_id": s.FuncCallIDs[idx], "output_index": idx, "item": map[string]any{"id": s.FuncCallIDs[idx], "type": "function_call", "status": "completed", "call_id": ev.ToolCall.ID, "name": ev.ToolCall.Name, "arguments": ev.ToolCall.Args}})
-		out = append(out, formatResponsesSSE("response.output_item.done", b))
+		out = append(out, ir.BuildResponsesOutputItemDoneFunctionCallSSE(ns(), s.FuncCallIDs[idx], idx, ev.ToolCall.ID, ev.ToolCall.Name, ev.ToolCall.Args))
 	case ir.EventTypeToolCallDelta:
 		idx := ev.ToolCallIndex
 		if _, ok := s.FuncCallIDs[idx]; !ok {
 			s.FuncCallIDs[idx] = fmt.Sprintf("fc_%s", ev.ToolCall.ID)
-			b, _ := json.Marshal(map[string]any{"type": "response.output_item.added", "sequence_number": ns(), "output_index": idx, "item": map[string]any{"id": s.FuncCallIDs[idx], "type": "function_call", "status": "in_progress", "call_id": ev.ToolCall.ID, "name": "", "arguments": ""}})
-			out = append(out, formatResponsesSSE("response.output_item.added", b))
+			out = append(out, ir.BuildResponsesOutputItemAddedFunctionCallSSE(ns(), idx, s.FuncCallIDs[idx], ev.ToolCall.ID, "", "in_progress"))
 		}
 		if s.FuncArgsBuffer[idx] == nil {
 			s.FuncArgsBuffer[idx] = &strings.Builder{}
 		}
 		s.FuncArgsBuffer[idx].WriteString(ev.ToolCall.Args)
-		b, _ := json.Marshal(map[string]any{"type": "response.function_call_arguments.delta", "sequence_number": ns(), "item_id": s.FuncCallIDs[idx], "output_index": idx, "delta": ev.ToolCall.Args})
-		out = append(out, formatResponsesSSE("response.function_call_arguments.delta", b))
+		out = append(out, ir.BuildResponsesFunctionCallArgsDeltaSSE(ns(), s.FuncCallIDs[idx], idx, ev.ToolCall.Args))
 	case ir.EventTypeFinish:
 		t, r := s.TextBuffer.String(), s.ReasoningBuffer.String()
 		if s.MsgID != "" {
-			b1, _ := json.Marshal(map[string]any{"type": "response.content_part.done", "sequence_number": ns(), "item_id": s.MsgID, "output_index": 0, "content_index": 0, "part": map[string]any{"type": "output_text", "text": t}})
-			out = append(out, formatResponsesSSE("response.content_part.done", b1))
-			b2, _ := json.Marshal(map[string]any{"type": "response.output_item.done", "sequence_number": ns(), "output_index": 0, "item": map[string]any{"id": s.MsgID, "type": "message", "status": "completed", "role": "assistant", "content": []any{map[string]any{"type": "output_text", "text": t}}}})
-			out = append(out, formatResponsesSSE("response.output_item.done", b2))
+			out = append(out, ir.BuildResponsesContentPartDoneSSE(ns(), s.MsgID, 0, 0, t))
+			out = append(out, ir.BuildResponsesOutputItemDoneMessageSSE(ns(), 0, s.MsgID, t))
 		}
 		if s.ReasoningID != "" {
-			b, _ := json.Marshal(map[string]any{"type": "response.output_item.done", "sequence_number": ns(), "output_index": 0, "item": map[string]any{"id": s.ReasoningID, "type": "reasoning", "status": "completed", "summary": []any{map[string]any{"type": "summary_text", "text": r}}}})
-			out = append(out, formatResponsesSSE("response.output_item.done", b))
+			out = append(out, ir.BuildResponsesOutputItemDoneReasoningSSE(ns(), 0, s.ReasoningID, r))
 		}
-		um := map[string]any{}
+		var usage *ir.ResponsesDoneUsage
 		if ev.Usage != nil {
-			um = map[string]any{"input_tokens": ev.Usage.PromptTokens, "output_tokens": ev.Usage.CompletionTokens, "total_tokens": ev.Usage.TotalTokens}
+			usage = &ir.ResponsesDoneUsage{
+				InputTokens:  ev.Usage.PromptTokens,
+				OutputTokens: ev.Usage.CompletionTokens,
+				TotalTokens:  ev.Usage.TotalTokens,
+			}
 			var ct int64
 			if ev.Usage.PromptTokensDetails != nil && ev.Usage.PromptTokensDetails.CachedTokens > 0 {
 				ct = ev.Usage.PromptTokensDetails.CachedTokens
@@ -948,7 +924,7 @@ func ToResponsesAPIChunk(ev ir.UnifiedEvent, model string, s *ResponsesStreamSta
 				ct = ev.Usage.CachedTokens
 			}
 			if ct > 0 {
-				um["input_tokens_details"] = map[string]any{"cached_tokens": ct}
+				usage.InputTokensDetails = &ir.ResponsesTokensDetails{CachedTokens: ct}
 			}
 			var rt int64
 			if ev.Usage.CompletionTokensDetails != nil && ev.Usage.CompletionTokensDetails.ReasoningTokens > 0 {
@@ -957,11 +933,10 @@ func ToResponsesAPIChunk(ev ir.UnifiedEvent, model string, s *ResponsesStreamSta
 				rt = int64(ev.Usage.ThoughtsTokenCount)
 			}
 			if rt > 0 {
-				um["output_tokens_details"] = map[string]any{"reasoning_tokens": rt}
+				usage.OutputTokensDetails = &ir.ResponsesOutputTokensDetails{ReasoningTokens: rt}
 			}
 		}
-		b, _ := json.Marshal(map[string]any{"type": "response.done", "sequence_number": ns(), "response": map[string]any{"id": s.ResponseID, "object": "response", "created_at": s.Created, "status": "completed", "usage": um}})
-		out = append(out, formatResponsesSSE("response.done", b))
+		out = append(out, ir.BuildResponsesDoneSSE(ns(), s.ResponseID, s.Created, usage))
 	}
 	return out, nil
 }

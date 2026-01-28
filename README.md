@@ -7,15 +7,33 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Docker](https://img.shields.io/docker/pulls/nghyane/llm-mux)](https://hub.docker.com/r/nghyane/llm-mux)
 [![Docs](https://img.shields.io/badge/docs-online-blue)](https://nghyane.github.io/llm-mux/)
+[![Discord](https://img.shields.io/discord/1326216179697410129?color=5865F2&logo=discord&logoColor=white)](https://discord.gg/86nFZUh4a9)
+
+---
+
+## 🎁 MiniMax Coding Plan - New Year Mega Offer!
+
+**🔥 GET 10% OFF INSTANTLY - No voucher needed!**
+
+Use the link below to get an immediate 10% discount when signing up for MiniMax Coding Plan:
+
+👉 **https://platform.minimax.io/subscribe/coding-plan?code=EljrpDLxkH&source=link**
+
+> 💡 **Why MiniMax?** Google Antigravity Claude quotas have been heavily throttled. MiniMax offers nearly identical quality at a lower cost with faster response times!
+
+---
 
 Turn your Claude Pro, GitHub Copilot, and Gemini subscriptions into standard LLM APIs. No API keys needed.
 
 ## Features
 
-- **Multi-Provider** — Claude, Copilot, Gemini, Codex, Qwen, Kiro, and more
+- **Multi-Provider** — Claude, Copilot, Gemini, Codex, Qwen, Kiro, iFlow, Cline, and more
 - **Multi-Format** — OpenAI, Anthropic, Gemini, Ollama compatible endpoints
 - **Multi-Account** — Load balance across accounts, auto-retry on quota limits
 - **Zero Config** — OAuth login, no API keys required
+- **Management API** — Usage statistics, auth management, runtime configuration
+- **Extended Thinking** — Support for Claude's extended thinking mode
+- **AMP CLI Compatible** — Drop-in replacement for Amp CLI with model mapping
 
 ## Quick Start
 
@@ -24,9 +42,9 @@ Turn your Claude Pro, GitHub Copilot, and Gemini subscriptions into standard LLM
 curl -fsSL https://raw.githubusercontent.com/nghyane/llm-mux/main/install.sh | bash
 
 # Login to a provider
-llm-mux --antigravity-login   # Google Gemini
-llm-mux --claude-login        # Claude Pro/Max
-llm-mux --copilot-login       # GitHub Copilot
+llm-mux login antigravity   # Google Gemini
+llm-mux login claude        # Claude Pro/Max
+llm-mux login copilot       # GitHub Copilot
 
 # Start server
 llm-mux
@@ -60,6 +78,8 @@ Works with: **Cursor, Aider, Claude Code, Cline, Continue, OpenCode, LangChain, 
 - [Configuration](https://nghyane.github.io/llm-mux/#/configuration) — Config file reference
 - [Integrations](https://nghyane.github.io/llm-mux/#/integrations/) — Editor and framework setup
 - [Docker](https://nghyane.github.io/llm-mux/#/docker) — Container deployment
+- [Service Management](https://nghyane.github.io/llm-mux/#/service-management) — Background service setup
+- [API Reference](https://nghyane.github.io/llm-mux/#/api-reference) — Complete API documentation
 
 ## License
 

@@ -129,8 +129,15 @@ func (rd *AuthRuntimeData) GetProviderData() any {
 }
 
 // getOrCreateQuotaGroupIndex returns the quota group index from auth.Runtime,
-// creating it if necessary. This function is thread-safe and preserves
-// any existing provider-specific runtime data.
+// creating it if necessary.
+//
+// CRITICAL: This function MUST only be called while holding the Manager's lock (m.mu).
+// It is NOT safe to call this concurrently on the same auth object without external
+// synchronization. The Manager ensures this by holding m.mu during MarkResult and other
+// state-modifying operations.
+//
+// The returned quotaGroupIndex has its own internal mutex for thread-safe read/write
+// operations after initialization.
 func getOrCreateQuotaGroupIndex(auth *Auth) *quotaGroupIndex {
 	if auth == nil {
 		return nil
@@ -184,28 +191,6 @@ func getQuotaGroupIndex(auth *Auth) *quotaGroupIndex {
 	}
 
 	return nil
-}
-
-// GetProviderRuntimeData extracts the original provider-specific runtime data
-// from auth.Runtime, unwrapping AuthRuntimeData if necessary.
-// This allows providers like gemini-cli to access their credentials.
-func GetProviderRuntimeData(auth *Auth) any {
-	if auth == nil || auth.Runtime == nil {
-		return nil
-	}
-
-	// If wrapped in AuthRuntimeData, return the original provider data
-	if rd, ok := auth.Runtime.(*AuthRuntimeData); ok {
-		return rd.ProviderData
-	}
-
-	// If it's a quotaGroupIndex, there's no provider data
-	if _, ok := auth.Runtime.(*quotaGroupIndex); ok {
-		return nil
-	}
-
-	// Otherwise, return as-is (raw provider data, not yet wrapped)
-	return auth.Runtime
 }
 
 // setGroupBlocked marks a quota group as blocked.
@@ -276,7 +261,11 @@ func (idx *quotaGroupIndex) isGroupBlocked(group string, now time.Time) (bool, t
 	idx.mu.Lock()
 	// Double-check after acquiring write lock
 	if state, ok := idx.blockedGroups[group]; ok && state != nil && !state.NextRetryAfter.After(now) {
-		delete(idx.blockedGroups, group)
+		// Check if quota has actually recovered before removing
+		// This prevents premature removal if quota still exhausted
+		if state.NextRecoverAt.IsZero() || now.After(state.NextRecoverAt) {
+			delete(idx.blockedGroups, group)
+		}
 	}
 	idx.mu.Unlock()
 

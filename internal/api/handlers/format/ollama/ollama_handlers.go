@@ -2,7 +2,6 @@ package ollama
 
 import (
 	"bytes"
-	"context"
 	"fmt"
 	"net/http"
 	"strings"
@@ -54,11 +53,9 @@ func (h *OllamaAPIHandler) Tags(c *gin.Context) {
 	c.Header("Access-Control-Allow-Origin", "*")
 	c.Header("Server", fmt.Sprintf("ollama/%s", OllamaVersion))
 
-	// Get all available models from registry
 	modelRegistry := registry.GetGlobalRegistry()
 	allModels := modelRegistry.GetAvailableModels("openai")
 
-	// Convert to Ollama format
 	ollamaModels := make([]map[string]any, 0)
 	for _, model := range allModels {
 		modelID := ""
@@ -272,7 +269,7 @@ func (h *OllamaAPIHandler) handleOllamaChatStream(c *gin.Context, _ *openai.Open
 	}
 
 	// Get context with cancel
-	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
+	cliCtx, cliCancel := h.GetContextWithCancel(c.Request.Context(), h, c)
 	defer func() {
 		cliCancel(nil)
 	}()
@@ -338,7 +335,7 @@ func (h *OllamaAPIHandler) handleOllamaChatNonStream(c *gin.Context, _ *openai.O
 	c.Header("Server", fmt.Sprintf("ollama/%s", OllamaVersion))
 
 	// Get context with cancel
-	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
+	cliCtx, cliCancel := h.GetContextWithCancel(c.Request.Context(), h, c)
 	defer func() {
 		cliCancel(nil)
 	}()
@@ -387,7 +384,7 @@ func (h *OllamaAPIHandler) handleOllamaGenerateStream(c *gin.Context, _ *openai.
 	}
 
 	// Get context with cancel
-	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
+	cliCtx, cliCancel := h.GetContextWithCancel(c.Request.Context(), h, c)
 	defer func() {
 		cliCancel(nil)
 	}()
@@ -453,7 +450,7 @@ func (h *OllamaAPIHandler) handleOllamaGenerateNonStream(c *gin.Context, _ *open
 	c.Header("Server", fmt.Sprintf("ollama/%s", OllamaVersion))
 
 	// Get context with cancel
-	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
+	cliCtx, cliCancel := h.GetContextWithCancel(c.Request.Context(), h, c)
 	defer func() {
 		cliCancel(nil)
 	}()

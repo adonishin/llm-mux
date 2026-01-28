@@ -11,8 +11,8 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/nghyane/llm-mux/internal/config"
-	"github.com/nghyane/llm-mux/internal/util"
 	log "github.com/nghyane/llm-mux/internal/logging"
+	"github.com/nghyane/llm-mux/internal/util"
 )
 
 func (w *Watcher) scheduleConfigReload() {
@@ -27,11 +27,6 @@ func (w *Watcher) scheduleConfigReload() {
 		w.configReloadMu.Unlock()
 		w.doReloadConfigIfChanged()
 	})
-}
-
-func (w *Watcher) reloadConfigIfChanged() {
-	// Public entry point - just delegate to the implementation
-	w.doReloadConfigIfChanged()
 }
 
 func (w *Watcher) doReloadConfigIfChanged() {
@@ -111,7 +106,6 @@ func (w *Watcher) reloadConfig() bool {
 	// Always apply the current log level based on the latest config.
 	// This ensures logrus reflects the desired level even if change detection misses.
 	util.SetLogLevel(newConfig)
-	// Additional debug for visibility when the flag actually changes.
 	if oldConfig != nil && oldConfig.Debug != newConfig.Debug {
 		log.Debugf("log level updated - debug mode changed from %t to %t", oldConfig.Debug, newConfig.Debug)
 	}
@@ -147,21 +141,26 @@ func (w *Watcher) stopConfigReloadTimer() {
 	w.configReloadMu.Unlock()
 }
 
-// persistConfigAsync asynchronously persists the config change through the token store
+// persistConfigAsync asynchronously persists the config change through the token store.
+// Uses singleflight to deduplicate concurrent persistence calls under rapid config changes.
 func (w *Watcher) persistConfigAsync() {
 	if w == nil || w.storePersister == nil {
 		return
 	}
 	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		if err := w.storePersister.PersistConfig(ctx); err != nil {
-			log.Errorf("failed to persist config change: %v", err)
-		}
+		w.persistGroup.Do("config", func() (interface{}, error) {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			if err := w.storePersister.PersistConfig(ctx); err != nil {
+				log.Errorf("failed to persist config change: %v", err)
+			}
+			return nil, nil
+		})
 	}()
 }
 
-// persistAuthAsync asynchronously persists auth file changes through the token store
+// persistAuthAsync asynchronously persists auth file changes through the token store.
+// Uses singleflight to deduplicate concurrent persistence calls under rapid auth changes.
 func (w *Watcher) persistAuthAsync(message string, paths ...string) {
 	if w == nil || w.storePersister == nil {
 		return
@@ -176,10 +175,13 @@ func (w *Watcher) persistAuthAsync(message string, paths ...string) {
 		return
 	}
 	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		if err := w.storePersister.PersistAuthFiles(ctx, message, filtered...); err != nil {
-			log.Errorf("failed to persist auth changes: %v", err)
-		}
+		w.persistGroup.Do("auth", func() (interface{}, error) {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			if err := w.storePersister.PersistAuthFiles(ctx, message, filtered...); err != nil {
+				log.Errorf("failed to persist auth changes: %v", err)
+			}
+			return nil, nil
+		})
 	}()
 }

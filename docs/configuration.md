@@ -3,7 +3,7 @@
 Config file: `~/.config/llm-mux/config.yaml`
 
 ```bash
-llm-mux --init  # Creates config, auth dir, and management key
+llm-mux init  # Creates config, auth dir, and management key
 ```
 
 ---
@@ -24,7 +24,9 @@ proxy-url: ""                           # Global proxy (http/https/socks5)
 ```yaml
 request-retry: 3                        # Retry attempts
 max-retry-interval: 30                  # Max seconds between retries
+stream-timeout: 300                     # Stream timeout in seconds
 disable-cooling: false                  # Skip cooldown after quota errors
+quota-window: 60                        # Quota tracking window in seconds
 ```
 
 ## TLS
@@ -136,22 +138,80 @@ providers:
 
 ## Environment Variables
 
-Cloud deployment options:
+Environment variables override config file values. All use `LLM_MUX_` prefix.
+
+### Core Settings
+
+| Variable | Description | Example |
+|----------|-------------|---------|
+| `LLM_MUX_PORT` | Server port | `8317` |
+| `LLM_MUX_DEBUG` | Enable debug logging | `true` |
+| `LLM_MUX_DISABLE_AUTH` | Disable API key authentication | `true` |
+| `LLM_MUX_API_KEYS` | Comma-separated API keys | `key1,key2,key3` |
+| `LLM_MUX_PROXY_URL` | Global proxy URL | `socks5://proxy:1080` |
+| `LLM_MUX_AUTH_DIR` | OAuth tokens directory | `~/.config/llm-mux/auth` |
+| `LLM_MUX_LOGGING_TO_FILE` | Enable file logging | `true` |
+| `LLM_MUX_REQUEST_RETRY` | Retry attempts | `3` |
+| `LLM_MUX_MAX_RETRY_INTERVAL` | Max retry interval (seconds) | `30` |
+| `LLM_MUX_STREAM_TIMEOUT` | Stream timeout (seconds) | `300` |
+
+### Management API
+
+| Variable | Description |
+|----------|-------------|
+| `LLM_MUX_MANAGEMENT_KEY` | Management API authentication key |
+| `LLM_MUX_ALLOW_REMOTE` | Allow remote management access (`true` or `1`) |
+
+> **Note:** Remote management requires both:
+> - A management key (`LLM_MUX_MANAGEMENT_KEY` or `~/.config/llm-mux/credentials.json`)
+> - Remote access enabled (`LLM_MUX_ALLOW_REMOTE=true` or `allow-remote: true` in config)
+
+### Usage Statistics
+
+| Variable | Description | Example |
+|----------|-------------|---------|
+| `LLM_MUX_USAGE_DSN` | Database connection string | `sqlite://~/.config/llm-mux/usage.db` |
+| `LLM_MUX_USAGE_RETENTION_DAYS` | Days to keep usage records | `30` |
+
+### Storage Backend Selection
+
+Use `LLM_MUX_STORE_TYPE` to explicitly select a storage backend for multi-instance deployments:
+
+| Value | Backend |
+|-------|---------|
+| `local` | Local filesystem (default) |
+| `postgres`, `pg` | PostgreSQL |
+| `git` | Git repository |
+| `s3`, `object`, `minio` | S3-compatible object storage |
+
+### PostgreSQL Storage
 
 ```bash
-# PostgreSQL token store
-PGSTORE_DSN=postgresql://user:pass@host:5432/db
-
-# S3-compatible storage
-OBJECTSTORE_ENDPOINT=https://s3.amazonaws.com
-OBJECTSTORE_BUCKET=llm-mux-tokens
-OBJECTSTORE_ACCESS_KEY=...
-OBJECTSTORE_SECRET_KEY=...
-
-# Git-backed config
-GITSTORE_GIT_URL=https://github.com/org/config.git
-GITSTORE_GIT_TOKEN=ghp_...
+LLM_MUX_STORE_TYPE=postgres
+LLM_MUX_PGSTORE_DSN=postgresql://user:pass@host:5432/db
+LLM_MUX_PGSTORE_SCHEMA=llm_mux          # optional
 ```
+
+### Git Storage
+
+```bash
+LLM_MUX_STORE_TYPE=git
+LLM_MUX_GITSTORE_URL=https://github.com/org/config.git
+LLM_MUX_GITSTORE_USERNAME=user
+LLM_MUX_GITSTORE_TOKEN=ghp_...
+```
+
+### S3/Object Storage
+
+```bash
+LLM_MUX_STORE_TYPE=s3
+LLM_MUX_OBJECTSTORE_ENDPOINT=https://s3.amazonaws.com
+LLM_MUX_OBJECTSTORE_BUCKET=llm-mux-tokens
+LLM_MUX_OBJECTSTORE_ACCESS_KEY=...
+LLM_MUX_OBJECTSTORE_SECRET_KEY=...
+```
+
+All remote stores sync to the standard XDG paths (`~/.config/llm-mux/config.yaml` and `~/.config/llm-mux/auth/`).
 
 ---
 
@@ -216,15 +276,16 @@ routing:
 ## Usage Statistics
 
 ```yaml
-usage-statistics-enabled: true
-
-usage-persistence:
-  enabled: true
-  db-path: "~/.config/llm-mux/usage.db"
-  batch-size: 100           # Records per batch write
-  flush-interval: 60        # Seconds between flushes
-  retention-days: 30        # Days to keep records
+usage:
+  dsn: "sqlite://~/.config/llm-mux/usage.db"  # or postgres://...
+  batch-size: 100             # Records per batch write
+  flush-interval: "5s"        # Duration between flushes
+  retention-days: 30          # Days to keep records
 ```
+
+Supported database backends:
+- `sqlite:///path/to/db.sqlite` — Local SQLite (default)
+- `postgres://user:pass@host:5432/db` — PostgreSQL
 
 ---
 
@@ -289,6 +350,12 @@ remote-management:
 
 ws-auth: false              # WebSocket authentication
 use-canonical-translator: true  # IR translator (recommended)
+```
+
+For remote management via environment variables:
+```bash
+export LLM_MUX_MANAGEMENT_KEY=your-secret-key
+export LLM_MUX_ALLOW_REMOTE=true
 ```
 
 See [API Reference](api-reference.md#management-api) for management endpoints.

@@ -2,7 +2,6 @@ package executor
 
 import (
 	"compress/flate"
-	"compress/gzip"
 	"fmt"
 	"io"
 	"net/http"
@@ -10,7 +9,9 @@ import (
 	"sync"
 
 	"github.com/andybalholm/brotli"
+	"github.com/klauspost/compress/gzip"
 	"github.com/klauspost/compress/zstd"
+	"github.com/valyala/bytebufferpool"
 )
 
 type HeaderConfig struct {
@@ -21,7 +22,7 @@ type HeaderConfig struct {
 }
 
 func ApplyAPIHeaders(r *http.Request, cfg HeaderConfig, stream bool) {
-	r.Header.Set("Content-Type", "application/json")
+	SetCommonHeaders(r, "application/json")
 	r.Header.Set("Authorization", "Bearer "+cfg.Token)
 
 	if stream {
@@ -181,4 +182,60 @@ func decodeResponseBody(body io.ReadCloser, contentEncoding string) (io.ReadClos
 		}
 	}
 	return body, nil
+}
+
+// DecodeResponseBody is an exported alias for decodeResponseBody.
+func DecodeResponseBody(body io.ReadCloser, contentEncoding string) (io.ReadCloser, error) {
+	return decodeResponseBody(body, contentEncoding)
+}
+
+const (
+	gzipCompressionThreshold = 1024
+	gzipCompressionLevel     = gzip.BestSpeed
+)
+
+var gzipWriterPool = sync.Pool{
+	New: func() any {
+		w, _ := gzip.NewWriterLevel(nil, gzipCompressionLevel)
+		return w
+	},
+}
+
+type CompressedBody struct {
+	Data         []byte
+	IsCompressed bool
+}
+
+func CompressRequestBody(body []byte) CompressedBody {
+	if len(body) < gzipCompressionThreshold {
+		return CompressedBody{Data: body, IsCompressed: false}
+	}
+
+	gw := gzipWriterPool.Get().(*gzip.Writer)
+	buf := bytebufferpool.Get()
+
+	gw.Reset(buf)
+	_, err := gw.Write(body)
+	if err != nil {
+		gzipWriterPool.Put(gw)
+		bytebufferpool.Put(buf)
+		return CompressedBody{Data: body, IsCompressed: false}
+	}
+	if err := gw.Close(); err != nil {
+		gzipWriterPool.Put(gw)
+		bytebufferpool.Put(buf)
+		return CompressedBody{Data: body, IsCompressed: false}
+	}
+	gzipWriterPool.Put(gw)
+
+	if buf.Len() >= len(body) {
+		bytebufferpool.Put(buf)
+		return CompressedBody{Data: body, IsCompressed: false}
+	}
+
+	result := make([]byte, buf.Len())
+	copy(result, buf.Bytes())
+	bytebufferpool.Put(buf)
+
+	return CompressedBody{Data: result, IsCompressed: true}
 }

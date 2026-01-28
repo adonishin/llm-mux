@@ -6,22 +6,36 @@ package registry
 // Shared Gemini Model Definitions
 // =============================================================================
 
+// DefaultThinkingBudgetsForGemini provides standard level-to-budget mapping for Gemini models.
+var DefaultThinkingBudgetsForGemini = ThinkingBudgets{
+	Low:    1024,
+	Medium: 8192,
+	High:   32768,
+	Max:    32768,
+}
+
 // geminiModels defines metadata for Gemini-family models (used by all Google providers).
 // Models not in this list will use upstream values directly (passthrough).
 var geminiModels = []*ModelInfo{
 	// Gemini 3.x
-	Gemini("gemini-3-pro-preview").Upstream("gemini-3-pro-high").Display("Gemini 3 Pro Preview").
-		Desc("Gemini 3 Pro Preview").Version("3.0").Created(1731888000).Thinking(128, 32768).B(),
+	Gemini("gemini-3-pro-high").Display("Gemini 3 Pro").
+		Desc("Gemini 3 Pro").Version("3.0").Created(1731888000).
+		ThinkingWithLevel(ThinkingLevelHigh, DefaultThinkingBudgetsForGemini, 128, 32768).B(),
+	Gemini("gemini-3-pro-low").Display("Gemini 3 Pro Low").
+		Desc("Gemini 3 Pro Low").Version("3.0").Created(1731888000).B(),
 	Gemini("gemini-3-flash").Display("Gemini 3 Flash").
-		Desc("Gemini 3 Flash").Version("3.0").Created(1737158400).Thinking(128, 32768).B(),
+		Desc("Gemini 3 Flash").Version("3.0").Created(1737158400).
+		ThinkingWithLevel(ThinkingLevelHigh, DefaultThinkingBudgetsForGemini, 128, 32768).B(),
 	Gemini("gemini-3-flash-preview").Display("Gemini 3 Flash Preview").
-		Desc("Gemini 3 Flash Preview").Version("3.0").Created(1737158400).Thinking(128, 32768).B(),
+		Desc("Gemini 3 Flash Preview").Version("3.0").Created(1737158400).
+		ThinkingWithLevel(ThinkingLevelHigh, DefaultThinkingBudgetsForGemini, 128, 32768).B(),
 	Gemini("gemini-3-pro-image-preview").Display("Gemini 3 Pro Image Preview").
 		Desc("Gemini 3 Pro Image Preview").Version("3.0").Created(1737158400).B(),
 
 	// Gemini 2.5
 	Gemini("gemini-2.5-pro").Display("Gemini 2.5 Pro").
-		Desc("Stable release (June 17th, 2025) of Gemini 2.5 Pro").Version("2.5").Created(1750118400).Thinking(128, 32768).B(),
+		Desc("Stable release (June 17th, 2025) of Gemini 2.5 Pro").Version("2.5").Created(1750118400).
+		ThinkingWithLevel(ThinkingLevelHigh, DefaultThinkingBudgetsForGemini, 128, 32768).B(),
 	Gemini("gemini-2.5-flash").Display("Gemini 2.5 Flash").
 		Desc("Stable version of Gemini 2.5 Flash, our mid-size multimodal model that supports up to 1 million tokens, released in June of 2025.").
 		Version("001").Created(1750118400).ThinkingFull(0, 24576, true, true).B(),
@@ -37,12 +51,14 @@ var geminiModels = []*ModelInfo{
 
 // claudeViaAntigravityModels defines Claude models accessed via Antigravity (gemini-cli only).
 var claudeViaAntigravityModels = []*ModelInfo{
-	ClaudeVia("claude-sonnet-4-5", "gemini-cli").Display("Claude Sonnet 4.5").
+	ClaudeVia("claude-sonnet-4-5", "antigravity").Display("Claude Sonnet 4.5").
 		Desc("Claude Sonnet 4.5 via google antigravity").Version("4.5").Created(1759104000).B(),
-	ClaudeVia("claude-sonnet-4-5-thinking", "gemini-cli").Display("Claude Sonnet 4.5 Thinking").
-		Desc("Claude Sonnet 4.5 with extended thinking via google antigravity").Version("4.5").Created(1759104000).Thinking(1024, 100000).B(),
-	ClaudeVia("claude-opus-4-5-thinking", "gemini-cli").Display("Claude Opus 4.5 Thinking").
-		Desc("Claude Opus 4.5 with extended thinking via google antigravity").Version("4.5").Created(1761955200).Thinking(1024, 100000).B(),
+	ClaudeVia("claude-sonnet-4-5-thinking", "antigravity").Display("Claude Sonnet 4.5 Thinking").
+		Desc("Claude Sonnet 4.5 with extended thinking via google antigravity").Version("4.5").Created(1759104000).
+		ThinkingWithLevel(ThinkingLevelHigh, DefaultThinkingBudgetsForClaude, 8192, 32768).B(),
+	ClaudeVia("claude-opus-4-5-thinking", "antigravity").Display("Claude Opus 4.5 Thinking").
+		Desc("Claude Opus 4.5 with extended thinking via google antigravity").Version("4.5").Created(1761955200).
+		ThinkingWithLevel(ThinkingLevelHigh, DefaultThinkingBudgetsForClaude, 8192, 32768).B(),
 }
 
 // =============================================================================
@@ -50,7 +66,7 @@ var claudeViaAntigravityModels = []*ModelInfo{
 // =============================================================================
 
 var antigravityHiddenModels = []string{
-	"chat_20706", "chat_23310", "gemini-2.5-flash-thinking", "gemini-3-pro-low", "gemini-2.5-pro",
+	"chat_20706", "chat_23310", "gemini-2.5-flash-thinking", "gemini-2.5-pro",
 }
 
 // =============================================================================
@@ -65,12 +81,16 @@ var (
 )
 
 func init() {
-	n := len(geminiModels)
+	// Consolidate model slices for single-pass initialization
+	allModels := append(append([]*ModelInfo{}, geminiModels...), claudeViaAntigravityModels...)
+
+	n := len(allModels)
 	geminiMetaByID = make(map[string]*ModelInfo, n)
 	geminiUpstreamToID = make(map[string]string, n)
 	geminiIDToUpstream = make(map[string]string, n)
 
-	for _, m := range geminiModels {
+	// Single pass through all models (Gemini + Claude via Antigravity)
+	for _, m := range allModels {
 		geminiMetaByID[m.ID] = m
 		upstream := m.UpstreamName
 		if upstream == "" {
@@ -80,6 +100,7 @@ func init() {
 		geminiIDToUpstream[m.ID] = upstream
 	}
 
+	// Pre-allocate and populate hidden set
 	antigravityHiddenSet = make(map[string]bool, len(antigravityHiddenModels))
 	for _, name := range antigravityHiddenModels {
 		antigravityHiddenSet[name] = true
@@ -108,6 +129,33 @@ func GetGeminiModelsForProvider(providerType string) []*ModelInfo {
 			clone := cloneModelWithType(m, providerType)
 			models = append(models, clone)
 		}
+	}
+
+	return models
+}
+
+// GetAntigravityFallbackModels returns static fallback models for antigravity provider.
+// Unlike GetGeminiModelsForProvider("gemini-cli"), this function:
+// 1. Preserves "antigravity" as the provider Type
+// 2. Applies antigravityHiddenSet filter to exclude hidden models
+// This is used when dynamic fetch from Antigravity API fails.
+func GetAntigravityFallbackModels() []*ModelInfo {
+	var models []*ModelInfo
+
+	// Clone geminiModels with antigravity type
+	for _, m := range geminiModels {
+		// Skip hidden models for antigravity
+		if antigravityHiddenSet[m.ID] {
+			continue
+		}
+		clone := cloneModelWithType(m, "antigravity")
+		models = append(models, clone)
+	}
+
+	// Add Claude via Antigravity models (these are not hidden)
+	for _, m := range claudeViaAntigravityModels {
+		clone := cloneModelWithType(m, "antigravity")
+		models = append(models, clone)
 	}
 
 	return models

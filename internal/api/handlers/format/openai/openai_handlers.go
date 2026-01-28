@@ -2,7 +2,6 @@ package openai
 
 import (
 	"bytes"
-	"context"
 	"fmt"
 	"net/http"
 
@@ -21,6 +20,7 @@ var (
 	sseEventPrefix = []byte("event:")
 	sseDataPrefix  = []byte("data: ")
 	sseNewline     = []byte("\n\n")
+	sseDoneMarker  = []byte("data: [DONE]\n\n")
 )
 
 // OpenAIAPIHandler contains the handlers for OpenAI API endpoints.
@@ -50,7 +50,6 @@ func (h *OpenAIAPIHandler) HandlerType() string {
 
 // Models returns the OpenAI-compatible model metadata supported by this handler.
 func (h *OpenAIAPIHandler) Models() []map[string]any {
-	// Get dynamic models from the global registry
 	modelRegistry := registry.GetGlobalRegistry()
 	return modelRegistry.GetAvailableModels("openai")
 }
@@ -59,7 +58,6 @@ func (h *OpenAIAPIHandler) Models() []map[string]any {
 // It returns a list of available AI models with their capabilities
 // and specifications in OpenAI-compatible format.
 func (h *OpenAIAPIHandler) OpenAIModels(c *gin.Context) {
-	// Get all available models
 	allModels := h.Models()
 
 	// Filter to only include the 4 required fields: id, object, created, owned_by
@@ -105,7 +103,6 @@ func (h *OpenAIAPIHandler) ChatCompletions(c *gin.Context) {
 		return
 	}
 
-	// Check if the client requested a streaming response.
 	streamResult := gjson.GetBytes(rawJSON, "stream")
 	if streamResult.Type == gjson.True {
 		h.handleStreamingResponse(c, rawJSON)
@@ -135,7 +132,6 @@ func (h *OpenAIAPIHandler) Completions(c *gin.Context) {
 		return
 	}
 
-	// Check if the client requested a streaming response.
 	streamResult := gjson.GetBytes(rawJSON, "stream")
 	if streamResult.Type == gjson.True {
 		h.handleCompletionsStreamingResponse(c, rawJSON)
@@ -162,15 +158,12 @@ func convertCompletionsRequestToChatCompletions(rawJSON []byte) []byte {
 		prompt = "Complete this:"
 	}
 
-	// Create chat completions structure
 	out := `{"model":"","messages":[{"role":"user","content":""}]}`
 
-	// Set model
 	if model := root.Get("model"); model.Exists() {
 		out, _ = sjson.Set(out, "model", model.String())
 	}
 
-	// Set the prompt as user message content
 	out, _ = sjson.Set(out, "messages.0.content", prompt)
 
 	// Copy other parameters from completions to chat completions
@@ -302,11 +295,9 @@ func convertChatCompletionsResponseToCompletions(rawJSON []byte) []byte {
 func convertChatCompletionsStreamChunkToCompletions(chunkData []byte) []byte {
 	root := gjson.ParseBytes(chunkData)
 
-	// Check if this chunk has any meaningful content
 	hasContent := false
 	if chatChoices := root.Get("choices"); chatChoices.Exists() && chatChoices.IsArray() {
 		chatChoices.ForEach(func(_, choice gjson.Result) bool {
-			// Check if delta has content or finish_reason
 			if delta := choice.Get("delta"); delta.Exists() {
 				if content := delta.Get("content"); content.Exists() && content.String() != "" {
 					hasContent = true
@@ -396,7 +387,7 @@ func (h *OpenAIAPIHandler) handleNonStreamingResponse(c *gin.Context, rawJSON []
 	c.Header("Content-Type", "application/json")
 
 	modelName := gjson.GetBytes(rawJSON, "model").String()
-	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
+	cliCtx, cliCancel := h.GetContextWithCancel(c.Request.Context(), h, c)
 	resp, errMsg := h.ExecuteWithAuthManager(cliCtx, h.HandlerType(), modelName, rawJSON, h.GetAlt(c))
 	if errMsg != nil {
 		h.WriteErrorResponse(c, errMsg)
@@ -420,7 +411,6 @@ func (h *OpenAIAPIHandler) handleStreamingResponse(c *gin.Context, rawJSON []byt
 	c.Header("Connection", "keep-alive")
 	c.Header("Access-Control-Allow-Origin", "*")
 
-	// Get the http.Flusher interface to manually flush the response.
 	flusher, ok := c.Writer.(http.Flusher)
 	if !ok {
 		c.JSON(http.StatusInternalServerError, format.ErrorResponse{
@@ -433,7 +423,7 @@ func (h *OpenAIAPIHandler) handleStreamingResponse(c *gin.Context, rawJSON []byt
 	}
 
 	modelName := gjson.GetBytes(rawJSON, "model").String()
-	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
+	cliCtx, cliCancel := h.GetContextWithCancel(c.Request.Context(), h, c)
 	dataChan, errChan := h.ExecuteStreamWithAuthManager(cliCtx, h.HandlerType(), modelName, rawJSON, h.GetAlt(c))
 	h.handleStreamResult(c, flusher, func(err error) { cliCancel(err) }, dataChan, errChan)
 }
@@ -448,11 +438,10 @@ func (h *OpenAIAPIHandler) handleStreamingResponse(c *gin.Context, rawJSON []byt
 func (h *OpenAIAPIHandler) handleCompletionsNonStreamingResponse(c *gin.Context, rawJSON []byte) {
 	c.Header("Content-Type", "application/json")
 
-	// Convert completions request to chat completions format
 	chatCompletionsJSON := convertCompletionsRequestToChatCompletions(rawJSON)
 
 	modelName := gjson.GetBytes(chatCompletionsJSON, "model").String()
-	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
+	cliCtx, cliCancel := h.GetContextWithCancel(c.Request.Context(), h, c)
 	resp, errMsg := h.ExecuteWithAuthManager(cliCtx, h.HandlerType(), modelName, chatCompletionsJSON, "")
 	if errMsg != nil {
 		h.WriteErrorResponse(c, errMsg)
@@ -477,7 +466,6 @@ func (h *OpenAIAPIHandler) handleCompletionsStreamingResponse(c *gin.Context, ra
 	c.Header("Connection", "keep-alive")
 	c.Header("Access-Control-Allow-Origin", "*")
 
-	// Get the http.Flusher interface to manually flush the response.
 	flusher, ok := c.Writer.(http.Flusher)
 	if !ok {
 		c.JSON(http.StatusInternalServerError, format.ErrorResponse{
@@ -489,13 +477,13 @@ func (h *OpenAIAPIHandler) handleCompletionsStreamingResponse(c *gin.Context, ra
 		return
 	}
 
-	// Convert completions request to chat completions format
 	chatCompletionsJSON := convertCompletionsRequestToChatCompletions(rawJSON)
 
 	modelName := gjson.GetBytes(chatCompletionsJSON, "model").String()
-	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
+	cliCtx, cliCancel := h.GetContextWithCancel(c.Request.Context(), h, c)
 	dataChan, errChan := h.ExecuteStreamWithAuthManager(cliCtx, h.HandlerType(), modelName, chatCompletionsJSON, "")
 
+	sw := format.NewSSEWriter(c.Writer)
 	for {
 		select {
 		case <-c.Request.Context().Done():
@@ -503,14 +491,20 @@ func (h *OpenAIAPIHandler) handleCompletionsStreamingResponse(c *gin.Context, ra
 			return
 		case chunk, isOk := <-dataChan:
 			if !isOk {
-				_, _ = fmt.Fprintf(c.Writer, "data: [DONE]\n\n")
+				sw.Write(sseDoneMarker)
 				flusher.Flush()
 				cliCancel()
 				return
 			}
 			converted := convertChatCompletionsStreamChunkToCompletions(chunk)
 			if converted != nil {
-				_, _ = fmt.Fprintf(c.Writer, "data: %s\n\n", string(converted))
+				sw.Write(sseDataPrefix)
+				sw.Write(converted)
+				sw.Write(sseNewline)
+				if !sw.Ok() {
+					cliCancel(sw.Err())
+					return
+				}
 				flusher.Flush()
 			}
 		case errMsg, isOk := <-errChan:
@@ -531,6 +525,7 @@ func (h *OpenAIAPIHandler) handleCompletionsStreamingResponse(c *gin.Context, ra
 	}
 }
 func (h *OpenAIAPIHandler) handleStreamResult(c *gin.Context, flusher http.Flusher, cancel func(error), data <-chan []byte, errs <-chan *interfaces.ErrorMessage) {
+	sw := format.NewSSEWriter(c.Writer)
 	for {
 		select {
 		case <-c.Request.Context().Done():
@@ -538,18 +533,21 @@ func (h *OpenAIAPIHandler) handleStreamResult(c *gin.Context, flusher http.Flush
 			return
 		case chunk, ok := <-data:
 			if !ok {
-				_, _ = fmt.Fprintf(c.Writer, "data: [DONE]\n\n")
+				sw.Write(sseDoneMarker)
 				flusher.Flush()
 				cancel(nil)
 				return
 			}
-			// Check if chunk is already in SSE format (bytes comparison, no string alloc)
 			if len(chunk) > 6 && (bytes.HasPrefix(chunk, sseEventPrefix) || bytes.HasPrefix(chunk, sseDataPrefix)) {
-				_, _ = c.Writer.Write(chunk)
+				sw.Write(chunk)
 			} else {
-				_, _ = c.Writer.Write(sseDataPrefix)
-				_, _ = c.Writer.Write(chunk)
-				_, _ = c.Writer.Write(sseNewline)
+				sw.Write(sseDataPrefix)
+				sw.Write(chunk)
+				sw.Write(sseNewline)
+			}
+			if !sw.Ok() {
+				cancel(sw.Err())
+				return
 			}
 			flusher.Flush()
 		case errMsg, ok := <-errs:

@@ -4,14 +4,15 @@
 
 ```bash
 # Create auth directory for OAuth tokens
-mkdir -p auths
+mkdir -p auth
 
 docker run -d \
   --name llm-mux \
   -p 8317:8317 \
   -v ./config.yaml:/llm-mux/config.yaml \
-  -v ./auths:/llm-mux/auth \
-  nghyane/llm-mux:latest
+  -v ./auth:/llm-mux/auth \
+  nghyane/llm-mux:latest \
+  ./llm-mux serve --config /llm-mux/config.yaml
 ```
 
 ## Docker Compose
@@ -21,11 +22,12 @@ services:
   llm-mux:
     image: nghyane/llm-mux:latest
     container_name: llm-mux
+    command: ["./llm-mux", "serve", "--config", "/llm-mux/config.yaml"]
     ports:
       - "8317:8317"
     volumes:
       - ./config.yaml:/llm-mux/config.yaml
-      - ./auths:/llm-mux/auth
+      - ./auth:/llm-mux/auth
     environment:
       - TZ=UTC
     restart: unless-stopped
@@ -47,7 +49,7 @@ docker compose up -d
 | Host | Container | Description |
 |------|-----------|-------------|
 | `./config.yaml` | `/llm-mux/config.yaml` | Config file |
-| `./auths/` | `/llm-mux/auth` | OAuth tokens |
+| `./auth/` | `/llm-mux/auth` | OAuth tokens |
 
 ### Minimal config.yaml
 
@@ -65,9 +67,9 @@ OAuth requires a browser. Options:
 
 **Option 1: Copy tokens from host**
 ```bash
-llm-mux --antigravity-login          # Login on host
-mkdir -p auths
-cp -r ~/.config/llm-mux/auth/* ./auths/
+llm-mux login antigravity          # Login on host
+mkdir -p auth
+cp -r ~/.config/llm-mux/auth/* ./auth/
 ```
 
 **Option 2: API keys only** (no OAuth needed)
@@ -83,7 +85,7 @@ providers:
 
 **Option 3: Get management key**
 ```bash
-docker exec llm-mux ./llm-mux --init
+docker exec llm-mux ./llm-mux init
 ```
 
 ---
@@ -112,10 +114,17 @@ For cloud deployments, see [Configuration - Environment Variables](configuration
 
 ```yaml
 environment:
-  - PGSTORE_DSN=postgresql://user:pass@postgres:5432/db
+  # Remote management (both required)
+  - LLM_MUX_MANAGEMENT_KEY=your-secret-key
+  - LLM_MUX_ALLOW_REMOTE=true
+  
+  # Storage backend (choose one)
+  - LLM_MUX_PGSTORE_DSN=postgresql://user:pass@postgres:5432/db
   # or
-  - OBJECTSTORE_ENDPOINT=https://s3.amazonaws.com
-  - OBJECTSTORE_BUCKET=llm-mux-tokens
+  - LLM_MUX_OBJECTSTORE_ENDPOINT=https://s3.amazonaws.com
+  - LLM_MUX_OBJECTSTORE_BUCKET=llm-mux-tokens
+  - LLM_MUX_OBJECTSTORE_ACCESS_KEY=...
+  - LLM_MUX_OBJECTSTORE_SECRET_KEY=...
 ```
 
 ---

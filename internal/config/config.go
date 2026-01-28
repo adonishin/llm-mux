@@ -108,12 +108,13 @@ type Config struct {
 	Debug            bool             `yaml:"debug" json:"debug"`
 	LoggingToFile    bool             `yaml:"logging-to-file" json:"logging-to-file"`
 
-	UsageStatisticsEnabled bool             `yaml:"usage-statistics-enabled" json:"usage-statistics-enabled"`
-	UsagePersistence       UsagePersistence `yaml:"usage-persistence" json:"usage-persistence"`
-	DisableCooling         bool             `yaml:"disable-cooling" json:"disable-cooling"`
-	RequestRetry           int              `yaml:"request-retry" json:"request-retry"`
-	MaxRetryInterval       int              `yaml:"max-retry-interval" json:"max-retry-interval"`
-	QuotaExceeded          QuotaExceeded    `yaml:"quota-exceeded" json:"quota-exceeded"`
+	Usage            UsageConfig   `yaml:"usage" json:"usage"`
+	DisableCooling   bool          `yaml:"disable-cooling" json:"disable-cooling"`
+	RequestRetry     int           `yaml:"request-retry" json:"request-retry"`
+	MaxRetryInterval int           `yaml:"max-retry-interval" json:"max-retry-interval"`
+	StreamTimeout    int           `yaml:"stream-timeout" json:"stream-timeout"`
+	QuotaWindow      int           `yaml:"quota-window" json:"quota-window"`
+	QuotaExceeded    QuotaExceeded `yaml:"quota-exceeded" json:"quota-exceeded"`
 
 	WebsocketAuth bool `yaml:"ws-auth" json:"ws-auth"`
 	DisableAuth   bool `yaml:"disable-auth" json:"disable-auth"`
@@ -131,6 +132,15 @@ type Config struct {
 
 	// UseCanonicalTranslator enables the unified IR translator architecture (default: true).
 	UseCanonicalTranslator bool `yaml:"use-canonical-translator" json:"use-canonical-translator" default:"true"`
+
+	// MaxRequestSize is the maximum allowed request body size in bytes.
+	// Set to 0 to use the default (50MB). This protects against DoS/OOM attacks
+	// from oversized payloads while accommodating multi-modal requests with images.
+	MaxRequestSize int64 `yaml:"max-request-size" json:"max-request-size"`
+
+	// MaxResponseSize is the maximum response body size to read into memory in bytes.
+	// Set to 0 to use the default (100MB). Applies to non-streaming responses only.
+	MaxResponseSize int64 `yaml:"max-response-size" json:"max-response-size"`
 }
 
 // TLSConfig holds HTTPS server settings.
@@ -151,21 +161,22 @@ type QuotaExceeded struct {
 	SwitchPreviewModel bool `yaml:"switch-preview-model" json:"switch-preview-model"`
 }
 
-// UsagePersistence defines SQLite persistence settings for usage statistics.
-type UsagePersistence struct {
-	// Enabled toggles SQLite persistence for usage records.
-	Enabled bool `yaml:"enabled" json:"enabled"`
+// UsageConfig defines usage tracking and persistence settings.
+type UsageConfig struct {
+	// DSN specifies the database connection using URI scheme:
+	//   sqlite:///path/to/db.sqlite (or sqlite://~/relative/path)
+	//   postgres://user:pass@host:port/dbname?sslmode=disable
+	// Empty string disables usage persistence.
+	DSN string `yaml:"dsn" json:"dsn"`
 
-	// DBPath is the filesystem path to the SQLite database file.
-	DBPath string `yaml:"db-path" json:"db-path"`
-
-	// BatchSize defines the number of records to batch before writing to database.
+	// BatchSize defines records to batch before writing. Default: 100.
 	BatchSize int `yaml:"batch-size" json:"batch-size"`
 
-	// FlushIntervalSecs defines how often to flush pending writes (in seconds).
-	FlushIntervalSecs int `yaml:"flush-interval" json:"flush-interval"`
+	// FlushInterval defines how often to flush pending writes.
+	// Accepts duration string (e.g., "5s", "1m"). Default: "5s".
+	FlushInterval string `yaml:"flush-interval" json:"flush-interval"`
 
-	// RetentionDays defines how many days of records to keep before cleanup.
+	// RetentionDays defines how many days of records to keep. Default: 30.
 	RetentionDays int `yaml:"retention-days" json:"retention-days"`
 }
 
@@ -271,11 +282,21 @@ func (r *RoutingConfig) HasProviderPriority() bool {
 func NewDefaultConfig() *Config {
 	return &Config{
 		Port:                   8317,
-		AuthDir:                "./",
-		DisableAuth:            true, // Local-first: no API key required by default
+		AuthDir:                "$XDG_CONFIG_HOME/llm-mux/auth",
+		DisableAuth:            true,
 		RequestRetry:           3,
 		MaxRetryInterval:       30,
+		StreamTimeout:          600, // 10 minutes for large context processing
+		QuotaWindow:            300,
 		UseCanonicalTranslator: true,
+		MaxRequestSize:         50 * 1024 * 1024,  // 50MB
+		MaxResponseSize:        100 * 1024 * 1024, // 100MB
+		Usage: UsageConfig{
+			DSN:           "", // Disabled by default, user must opt-in
+			BatchSize:     100,
+			FlushInterval: "5s",
+			RetentionDays: 30,
+		},
 		QuotaExceeded: QuotaExceeded{
 			SwitchProject:      true,
 			SwitchPreviewModel: true,
@@ -293,7 +314,7 @@ func GenerateDefaultConfigYAML() []byte {
 	data, err := yaml.Marshal(cfg)
 	if err != nil {
 		// Fallback to minimal config if marshaling fails
-		return []byte("port: 8317\nauth-dir: \"/etc/secrets/\"\ndisable-auth: true\n")
+		return []byte("port: 8317\nauth-dir: \"$XDG_CONFIG_HOME/llm-mux/auth\"\ndisable-auth: true\n")
 	}
 	return data
 }
@@ -345,9 +366,6 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 
 	// Sync request authentication providers with inline API keys for backwards compatibility.
 	syncInlineAccessProvider(&cfg)
-
-	// Sanitize Vertex-compatible API keys: drop entries without base-url
-	cfg.SanitizeVertexCompatKeys()
 
 	cfg.Providers = SanitizeProviders(cfg.Providers)
 
@@ -534,7 +552,6 @@ func SaveConfigPreserveCommentsUpdateNestedScalar(configFile string, path []stri
 	// descend mapping nodes following path
 	for i, key := range path {
 		if i == len(path)-1 {
-			// set final scalar
 			v := getOrCreateMapValue(node, key)
 			v.Kind = yaml.ScalarNode
 			v.Tag = "!!str"

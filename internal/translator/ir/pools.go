@@ -7,14 +7,48 @@ import (
 	"sync"
 )
 
-var BytesBufferPool = sync.Pool{
-	New: func() any {
-		return bytes.NewBuffer(make([]byte, 0, 1024))
-	},
+// -----------------------------------------------------------------------------
+// Generic Pool Wrapper
+// -----------------------------------------------------------------------------
+
+// Pool is a type-safe wrapper around sync.Pool using Go 1.18+ generics.
+type Pool[T any] struct {
+	pool sync.Pool
 }
 
+// NewPool creates a new type-safe pool with the given constructor function.
+func NewPool[T any](newFunc func() T) *Pool[T] {
+	return &Pool[T]{
+		pool: sync.Pool{
+			New: func() any { return newFunc() },
+		},
+	}
+}
+
+// Get retrieves an item from the pool without type assertion at call site.
+func (p *Pool[T]) Get() T {
+	return p.pool.Get().(T)
+}
+
+// Put returns an item to the pool.
+func (p *Pool[T]) Put(v T) {
+	p.pool.Put(v)
+}
+
+// -----------------------------------------------------------------------------
+// Bytes Buffer Pool
+// -----------------------------------------------------------------------------
+
+// BytesBufferPool provides reusable bytes.Buffer instances.
+// Initial capacity increased from 1KB to 4KB for better performance
+// with streaming responses that have larger intermediate buffers.
+var BytesBufferPool = NewPool(func() *bytes.Buffer {
+	return bytes.NewBuffer(make([]byte, 0, 4096))
+})
+
+// GetBuffer retrieves a buffer from the pool.
 func GetBuffer() *bytes.Buffer {
-	return BytesBufferPool.Get().(*bytes.Buffer)
+	return BytesBufferPool.Get()
 }
 
 // PutBuffer returns a buffer to the pool after resetting it.
@@ -23,17 +57,22 @@ func PutBuffer(buf *bytes.Buffer) {
 	BytesBufferPool.Put(buf)
 }
 
-// StringBuilderPool provides reusable strings.Builder instances.
-var StringBuilderPool = sync.Pool{
-	New: func() any {
-		b := &strings.Builder{}
-		b.Grow(512)
-		return b
-	},
-}
+// -----------------------------------------------------------------------------
+// String Builder Pool
+// -----------------------------------------------------------------------------
 
+// StringBuilderPool provides reusable strings.Builder instances.
+// Increased from 512B to 2KB for better handling of longer response strings
+// in streaming mode with larger context windows.
+var StringBuilderPool = NewPool(func() *strings.Builder {
+	b := &strings.Builder{}
+	b.Grow(2048)
+	return b
+})
+
+// GetStringBuilder retrieves a string builder from the pool.
 func GetStringBuilder() *strings.Builder {
-	return StringBuilderPool.Get().(*strings.Builder)
+	return StringBuilderPool.Get()
 }
 
 // PutStringBuilder returns a string builder to the pool after resetting it.
@@ -47,32 +86,20 @@ func PutStringBuilder(sb *strings.Builder) {
 // -----------------------------------------------------------------------------
 
 // uuidBytePool provides reusable byte slices for UUID generation.
-var uuidBytePool = sync.Pool{
-	New: func() any {
-		b := make([]byte, 16)
-		return &b
-	},
-}
+var uuidBytePool = NewPool(func() *[]byte {
+	b := make([]byte, 16)
+	return &b
+})
 
+// GetUUIDBuf retrieves a UUID buffer from the pool.
 func GetUUIDBuf() *[]byte {
-	return uuidBytePool.Get().(*[]byte)
+	return uuidBytePool.Get()
 }
 
 // PutUUIDBuf returns a UUID buffer to the pool.
 func PutUUIDBuf(b *[]byte) {
 	uuidBytePool.Put(b)
 }
-
-// -----------------------------------------------------------------------------
-// Pre-allocated common values
-// -----------------------------------------------------------------------------
-
-// Common empty values to avoid allocations
-var (
-	EmptyMap       = map[string]any{}
-	EmptySlice     = []any{}
-	EmptyStringMap = map[string]string{}
-)
 
 // JSON Schema version constants
 // Claude API requires JSON Schema draft 2020-12
@@ -81,69 +108,30 @@ const (
 	JSONSchemaDraft202012 = "https://json-schema.org/draft/2020-12/schema"
 )
 
-// Common JSON schema fragments (immutable, safe to share)
-var (
-	EmptyObjectSchema = map[string]any{
-		"type":       "object",
-		"properties": map[string]any{},
-	}
-
-	ClaudeEmptyInputSchema = map[string]any{
-		"type":                 "object",
-		"properties":           map[string]any{},
-		"additionalProperties": false,
-		"$schema":              JSONSchemaDraft202012,
-	}
-)
-
-// -----------------------------------------------------------------------------
-// SSE Chunk Pools - Optimized for streaming responses
-// -----------------------------------------------------------------------------
-
-// sseChunkPool provides reusable byte slices for SSE chunk building.
-var sseChunkPool = sync.Pool{
-	New: func() any {
-		// Typical SSE chunk: "data: {...}\n\n" - allocate 512 bytes
-		b := make([]byte, 0, 512)
-		return &b
-	},
-}
-
-func GetSSEChunkBuf() []byte {
-	bp := sseChunkPool.Get().(*[]byte)
-	return (*bp)[:0]
-}
-
-// PutSSEChunkBuf returns an SSE chunk buffer to the pool.
-func PutSSEChunkBuf(b []byte) {
-	if cap(b) >= 512 && cap(b) <= 4096 {
-		bp := b[:0]
-		sseChunkPool.Put(&bp)
-	}
-}
-
 func BuildSSEChunk(jsonData []byte) []byte {
-	size := 6 + len(jsonData) + 2 // "data: " + json + "\n\n"
-	buf := GetSSEChunkBuf()
-	if cap(buf) < size {
-		buf = make([]byte, 0, size)
-	}
-	buf = append(buf, "data: "...)
-	buf = append(buf, jsonData...)
-	buf = append(buf, "\n\n"...)
-	return buf
+	buf := GetBuffer()
+	defer PutBuffer(buf)
+
+	buf.WriteString("data: ")
+	buf.Write(jsonData)
+	buf.WriteString("\n\n")
+
+	result := make([]byte, buf.Len())
+	copy(result, buf.Bytes())
+	return result
 }
 
 func BuildSSEEvent(eventType string, jsonData []byte) []byte {
-	size := 7 + len(eventType) + 7 + len(jsonData) + 2
-	buf := GetSSEChunkBuf()
-	if cap(buf) < size {
-		buf = make([]byte, 0, size)
-	}
-	buf = append(buf, "event: "...)
-	buf = append(buf, eventType...)
-	buf = append(buf, "\ndata: "...)
-	buf = append(buf, jsonData...)
-	buf = append(buf, "\n\n"...)
-	return buf
+	buf := GetBuffer()
+	defer PutBuffer(buf)
+
+	buf.WriteString("event: ")
+	buf.WriteString(eventType)
+	buf.WriteString("\ndata: ")
+	buf.Write(jsonData)
+	buf.WriteString("\n\n")
+
+	result := make([]byte, buf.Len())
+	copy(result, buf.Bytes())
+	return result
 }

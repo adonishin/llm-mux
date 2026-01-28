@@ -13,7 +13,6 @@ import (
 	"github.com/nghyane/llm-mux/internal/provider"
 	"github.com/nghyane/llm-mux/internal/registry"
 	"github.com/nghyane/llm-mux/internal/util"
-	"github.com/tidwall/gjson"
 )
 
 type ErrorResponse struct {
@@ -69,7 +68,7 @@ func (h *BaseAPIHandler) GetAlt(c *gin.Context) string {
 	return alt
 }
 
-func (h *BaseAPIHandler) GetContextWithCancel(handler interfaces.APIHandler, c *gin.Context, ctx context.Context) (context.Context, APIHandlerCancelFunc) {
+func (h *BaseAPIHandler) GetContextWithCancel(ctx context.Context, handler interfaces.APIHandler, c *gin.Context) (context.Context, APIHandlerCancelFunc) {
 	newCtx, cancel := context.WithCancel(ctx)
 	newCtx = context.WithValue(newCtx, ctxKeyGin, c)
 	newCtx = context.WithValue(newCtx, ctxKeyHandler, handler)
@@ -117,7 +116,6 @@ func appendAPIResponse(c *gin.Context, data []byte) {
 
 // buildRequestOpts creates request and options, cloning payload/metadata only once (shared reference)
 func buildRequestOpts(normalizedModel string, rawJSON []byte, metadata map[string]any, handlerType string, alt string, stream bool) (provider.Request, provider.Options) {
-	// Clone once, share between req and opts
 	payload := cloneBytes(rawJSON)
 	meta := cloneMetadata(metadata)
 
@@ -208,7 +206,7 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 	req, opts := buildRequestOpts(normalizedModel, rawJSON, metadata, handlerType, alt, true)
 	chunks, err := h.AuthManager.ExecuteStream(ctx, providers, req, opts)
 	if err == nil {
-		return h.wrapStreamChannel(chunks)
+		return h.wrapStreamChannel(ctx, chunks)
 	}
 
 	fallbacks := h.getFallbackChain(normalizedModel)
@@ -220,7 +218,7 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 		fbReq, fbOpts := buildRequestOpts(fbNormalizedModel, rawJSON, fbMetadata, handlerType, alt, true)
 		fbChunks, fbErr := h.AuthManager.ExecuteStream(ctx, fbProviders, fbReq, fbOpts)
 		if fbErr == nil {
-			return h.wrapStreamChannel(fbChunks)
+			return h.wrapStreamChannel(ctx, fbChunks)
 		}
 	}
 
@@ -231,43 +229,35 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 	return nil, errChan
 }
 
-func (h *BaseAPIHandler) wrapStreamChannel(chunks <-chan provider.StreamChunk) (<-chan []byte, <-chan *interfaces.ErrorMessage) {
-	dataChan := make(chan []byte, 8) // Buffered to reduce blocking
+func (h *BaseAPIHandler) wrapStreamChannel(ctx context.Context, chunks <-chan provider.StreamChunk) (<-chan []byte, <-chan *interfaces.ErrorMessage) {
+	dataChan := make(chan []byte, 128)
 	errChan := make(chan *interfaces.ErrorMessage, 1)
 	go func() {
 		defer close(dataChan)
 		defer close(errChan)
-		for chunk := range chunks {
-			if chunk.Err != nil {
-				status, addon := extractErrorDetails(chunk.Err)
-				errChan <- &interfaces.ErrorMessage{StatusCode: status, Error: chunk.Err, Addon: addon}
+		for {
+			select {
+			case <-ctx.Done():
 				return
-			}
-			if len(chunk.Payload) > 0 {
-				// Check if payload is an error message
-				if bytes.HasPrefix(chunk.Payload, []byte("data: {\"error\":")) {
-					// Extract JSON part after "data: "
-					jsonStart := bytes.Index(chunk.Payload, []byte("data: "))
-					if jsonStart >= 0 {
-						jsonData := chunk.Payload[jsonStart+6:] // Skip "data: "
-						// Remove trailing \n\n
-						jsonData = bytes.TrimSuffix(jsonData, []byte("\n\n"))
-						if gjson.ValidBytes(jsonData) {
-							if msg := gjson.GetBytes(jsonData, "error.message"); msg.Exists() {
-								err := fmt.Errorf("streaming error: %s", msg.String())
-								status, addon := extractErrorDetails(err)
-								errChan <- &interfaces.ErrorMessage{StatusCode: status, Error: err, Addon: addon}
-								return
-							}
-						}
-					}
-					// Fallback
-					err := fmt.Errorf("streaming error")
-					status, addon := extractErrorDetails(err)
-					errChan <- &interfaces.ErrorMessage{StatusCode: status, Error: err, Addon: addon}
+			case chunk, ok := <-chunks:
+				if !ok {
 					return
 				}
-				dataChan <- chunk.Payload // No clone needed, executor already owns this
+				if chunk.Err != nil {
+					status, addon := extractErrorDetails(chunk.Err)
+					select {
+					case errChan <- &interfaces.ErrorMessage{StatusCode: status, Error: chunk.Err, Addon: addon}:
+					case <-ctx.Done():
+					}
+					return
+				}
+				if len(chunk.Payload) > 0 {
+					select {
+					case dataChan <- chunk.Payload:
+					case <-ctx.Done():
+						return
+					}
+				}
 			}
 		}
 	}()
@@ -350,9 +340,20 @@ func (h *BaseAPIHandler) WriteErrorResponse(c *gin.Context, msg *interfaces.Erro
 	}
 	c.Status(status)
 	if msg != nil && msg.Error != nil {
-		_, _ = c.Writer.Write([]byte(msg.Error.Error()))
+		errResp := ErrorResponse{
+			Error: ErrorDetail{
+				Message: msg.Error.Error(),
+				Type:    "server_error",
+			},
+		}
+		c.JSON(status, errResp)
 	} else {
-		_, _ = c.Writer.Write([]byte(http.StatusText(status)))
+		c.JSON(status, ErrorResponse{
+			Error: ErrorDetail{
+				Message: http.StatusText(status),
+				Type:    "server_error",
+			},
+		})
 	}
 }
 
@@ -374,3 +375,43 @@ func (h *BaseAPIHandler) LoggingAPIResponseError(ctx context.Context, err *inter
 }
 
 type APIHandlerCancelFunc func(params ...any)
+
+// SSEWriter wraps gin ResponseWriter with error-checked writes for SSE streaming.
+// Following Ollama's pattern: write errors terminate stream immediately to free upstream resources.
+type SSEWriter struct {
+	w   gin.ResponseWriter
+	err error
+}
+
+// NewSSEWriter creates a new SSE writer wrapper.
+func NewSSEWriter(w gin.ResponseWriter) *SSEWriter {
+	return &SSEWriter{w: w}
+}
+
+// Write writes data and tracks first error. Subsequent writes are no-ops after error.
+func (s *SSEWriter) Write(data []byte) bool {
+	if s.err != nil {
+		return false
+	}
+	_, s.err = s.w.Write(data)
+	return s.err == nil
+}
+
+// WriteString writes a string and tracks first error.
+func (s *SSEWriter) WriteString(data string) bool {
+	if s.err != nil {
+		return false
+	}
+	_, s.err = s.w.WriteString(data)
+	return s.err == nil
+}
+
+// Err returns the first write error encountered.
+func (s *SSEWriter) Err() error {
+	return s.err
+}
+
+// Ok returns true if no write errors have occurred.
+func (s *SSEWriter) Ok() bool {
+	return s.err == nil
+}

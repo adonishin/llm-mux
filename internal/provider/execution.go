@@ -34,7 +34,7 @@ func (m *Manager) executeWithProvider(ctx context.Context, provider string, req 
 	tried := make(map[string]struct{})
 	var lastErr error
 	for {
-		auth, executor, errPick := m.pickNext(ctx, provider, req.Model, opts, tried)
+		auth, executor, errPick := m.pickNextFromRegistry(ctx, provider, req.Model, opts, tried)
 		if errPick != nil {
 			telemetry.RecordError(span, errPick)
 			if lastErr != nil {
@@ -57,6 +57,16 @@ func (m *Manager) executeWithProvider(ctx context.Context, provider string, req 
 
 		if errBreaker != nil {
 			telemetry.RecordError(span, errBreaker)
+			if errors.Is(errBreaker, context.Canceled) || errors.Is(errBreaker, context.DeadlineExceeded) {
+				return Response{}, errBreaker
+			}
+
+			var provErr *Error
+			if errors.As(errBreaker, &provErr) && provErr.Code == "token_not_ready" {
+				tried[auth.ID] = struct{}{}
+				continue
+			}
+
 			markResult := Result{AuthID: auth.ID, Provider: provider, Model: req.Model, Success: false}
 			markResult.Error = &Error{Message: errBreaker.Error()}
 			var se StatusCodeError
@@ -94,7 +104,7 @@ func (m *Manager) executeCountWithProvider(ctx context.Context, provider string,
 	tried := make(map[string]struct{})
 	var lastErr error
 	for {
-		auth, executor, errPick := m.pickNext(ctx, provider, req.Model, opts, tried)
+		auth, executor, errPick := m.pickNextFromRegistry(ctx, provider, req.Model, opts, tried)
 		if errPick != nil {
 			if lastErr != nil {
 				return Response{}, lastErr
@@ -115,6 +125,16 @@ func (m *Manager) executeCountWithProvider(ctx context.Context, provider string,
 		})
 
 		if errBreaker != nil {
+			if errors.Is(errBreaker, context.Canceled) || errors.Is(errBreaker, context.DeadlineExceeded) {
+				return Response{}, errBreaker
+			}
+
+			var provErr *Error
+			if errors.As(errBreaker, &provErr) && provErr.Code == "token_not_ready" {
+				tried[auth.ID] = struct{}{}
+				continue
+			}
+
 			markResult := Result{AuthID: auth.ID, Provider: provider, Model: req.Model, Success: false}
 			markResult.Error = &Error{Message: errBreaker.Error()}
 			var se StatusCodeError
@@ -137,13 +157,15 @@ func (m *Manager) executeCountWithProvider(ctx context.Context, provider string,
 
 // ExecuteStreamWithProvider handles streaming execution for a single provider, attempting
 // multiple auth candidates until one succeeds or all are exhausted.
+// Consolidates stats tracking inline to reduce goroutine/channel overhead.
 func (m *Manager) executeStreamWithProvider(ctx context.Context, provider string, req Request, opts Options) (<-chan StreamChunk, error) {
 	if provider == "" {
 		return nil, &Error{Code: "provider_not_found", Message: "provider identifier is empty"}
 	}
 
-	breaker := m.getOrCreateBreaker(provider)
-	if breaker.State() == gobreaker.StateOpen {
+	breaker := m.getOrCreateStreamingBreaker(provider)
+	done, err := breaker.Allow()
+	if err != nil {
 		return nil, &Error{Code: "circuit_open", Message: "provider circuit breaker is open"}
 	}
 
@@ -152,8 +174,9 @@ func (m *Manager) executeStreamWithProvider(ctx context.Context, provider string
 	tried := make(map[string]struct{})
 	var lastErr error
 	for {
-		auth, executor, errPick := m.pickNext(ctx, provider, req.Model, opts, tried)
+		auth, executor, errPick := m.pickNextFromRegistry(ctx, provider, req.Model, opts, tried)
 		if errPick != nil {
+			done(false)
 			if lastErr != nil {
 				return nil, lastErr
 			}
@@ -167,6 +190,17 @@ func (m *Manager) executeStreamWithProvider(ctx context.Context, provider string
 		}
 		chunks, errStream := executor.ExecuteStream(execCtx, auth, req, opts)
 		if errStream != nil {
+			if errors.Is(errStream, context.Canceled) || errors.Is(errStream, context.DeadlineExceeded) {
+				done(false)
+				return nil, errStream
+			}
+
+			var provErr *Error
+			if errors.As(errStream, &provErr) && provErr.Code == "token_not_ready" {
+				tried[auth.ID] = struct{}{}
+				continue
+			}
+
 			rerr := &Error{Message: errStream.Error()}
 			var se StatusCodeError
 			if errors.As(errStream, &se) && se != nil {
@@ -178,40 +212,64 @@ func (m *Manager) executeStreamWithProvider(ctx context.Context, provider string
 			lastErr = errStream
 			continue
 		}
-		out := make(chan StreamChunk, 1)
-		go func(streamCtx context.Context, streamAuth *Auth, streamProvider string, streamChunks <-chan StreamChunk) {
+
+		// Single output channel - consolidates previous 2 wrapper layers
+		out := make(chan StreamChunk, 128) // Unified buffer size for all stream operations
+		startTime := time.Now()
+
+		go func(streamCtx context.Context, streamAuth *Auth, streamProvider string, streamModel string, streamChunks <-chan StreamChunk, cbDone func(bool)) {
 			defer close(out)
 			var failed bool
+
 			for {
 				select {
 				case <-streamCtx.Done():
+					// Context cancelled - record stats but don't count as failure
+					m.recordProviderResult(streamProvider, streamModel, !failed, time.Since(startTime))
+					cbDone(!failed)
 					return
+
 				case chunk, ok := <-streamChunks:
 					if !ok {
+						// Stream complete
 						if !failed {
-							m.MarkResult(streamCtx, Result{AuthID: streamAuth.ID, Provider: streamProvider, Model: req.Model, Success: true})
+							m.MarkResult(streamCtx, Result{AuthID: streamAuth.ID, Provider: streamProvider, Model: streamModel, Success: true})
 						}
+						m.recordProviderResult(streamProvider, streamModel, !failed, time.Since(startTime))
+						cbDone(!failed)
 						return
 					}
+
+					// Check for errors in chunk
 					if chunk.Err != nil && !failed {
+						if errors.Is(chunk.Err, context.Canceled) || errors.Is(chunk.Err, context.DeadlineExceeded) {
+							m.recordProviderResult(streamProvider, streamModel, true, time.Since(startTime))
+							cbDone(true)
+							return
+						}
 						failed = true
 						rerr := &Error{Message: chunk.Err.Error()}
 						var se StatusCodeError
 						if errors.As(chunk.Err, &se) && se != nil {
 							rerr.HTTPStatus = se.StatusCode()
 						}
-						result := Result{AuthID: streamAuth.ID, Provider: streamProvider, Model: req.Model, Success: false, Error: rerr}
+						result := Result{AuthID: streamAuth.ID, Provider: streamProvider, Model: streamModel, Success: false, Error: rerr}
 						result.RetryAfter = retryAfterFromError(chunk.Err)
 						m.MarkResult(streamCtx, result)
 					}
+
+					// Forward chunk - non-blocking with context check
 					select {
 					case out <- chunk:
 					case <-streamCtx.Done():
+						m.recordProviderResult(streamProvider, streamModel, !failed, time.Since(startTime))
+						cbDone(!failed)
 						return
 					}
 				}
 			}
-		}(execCtx, auth.Clone(), provider, chunks)
+		}(execCtx, auth.Clone(), provider, req.Model, chunks, done)
+
 		return out, nil
 	}
 }
@@ -254,40 +312,4 @@ func (m *Manager) executeStreamProvidersOnce(ctx context.Context, providers []st
 		return nil, lastErr
 	}
 	return nil, &Error{Code: "auth_not_found", Message: "no auth available"}
-}
-
-// wrapStreamForStats wraps a stream channel to record stats when complete.
-// Uses a buffered channel and non-blocking sends to prevent goroutine leaks
-// when consumers stop reading.
-// Context cancellation (user disconnect) is not counted as provider failure.
-func (m *Manager) wrapStreamForStats(ctx context.Context, in <-chan StreamChunk, provider, model string, start time.Time) <-chan StreamChunk {
-	out := make(chan StreamChunk, 1)
-	go func() {
-		defer close(out)
-		hasError := false
-		for {
-			select {
-			case <-ctx.Done():
-				// Context cancelled by client - don't count as provider failure
-				return
-			case chunk, ok := <-in:
-				if !ok {
-					// Input channel closed - stream complete
-					m.recordProviderResult(provider, model, !hasError, time.Since(start))
-					return
-				}
-				if chunk.Err != nil {
-					hasError = true
-				}
-				// Non-blocking send with context check
-				select {
-				case out <- chunk:
-				case <-ctx.Done():
-					// Context cancelled by client - don't count as provider failure
-					return
-				}
-			}
-		}
-	}()
-	return out
 }

@@ -10,9 +10,9 @@ import (
 	"strings"
 
 	"github.com/nghyane/llm-mux/internal/config"
+	log "github.com/nghyane/llm-mux/internal/logging"
 	"github.com/nghyane/llm-mux/internal/provider"
 	"github.com/nghyane/llm-mux/internal/util"
-	log "github.com/nghyane/llm-mux/internal/logging"
 )
 
 // reloadClients performs a full scan and reload of all clients.
@@ -50,7 +50,6 @@ func (w *Watcher) reloadClients(rescanAuth bool, affectedOAuthProviders []string
 		w.clientsMutex.Unlock()
 	}
 
-	// Create new API key clients based on the new config
 	geminiAPIKeyCount, vertexCompatAPIKeyCount, claudeAPIKeyCount, codexAPIKeyCount, openAICompatCount := BuildAPIKeyClients(cfg)
 	totalAPIKeyClients := geminiAPIKeyCount + vertexCompatAPIKeyCount + claudeAPIKeyCount + codexAPIKeyCount + openAICompatCount
 	log.Debugf("loaded %d API key clients", totalAPIKeyClients)
@@ -68,7 +67,6 @@ func (w *Watcher) reloadClients(rescanAuth bool, affectedOAuthProviders []string
 		log.Debugf("skipping auth directory rescan; retaining %d existing auth files", authFileCount)
 	}
 
-	// Update client maps
 	if rescanAuth {
 		// Build hash map WITHOUT holding lock (do all file I/O first)
 		newAuthHashes := make(map[string]string)
@@ -79,7 +77,7 @@ func (w *Watcher) reloadClients(rescanAuth bool, affectedOAuthProviders []string
 				if err != nil {
 					return nil
 				}
-				if !info.IsDir() && strings.HasSuffix(strings.ToLower(info.Name()), ".json") {
+				if !info.IsDir() && strings.HasSuffix(strings.ToLower(info.Name()), ".json") && info.Name() != ".llm-mux-manifest.json" {
 					if data, errReadFile := os.ReadFile(path); errReadFile == nil && len(data) > 0 {
 						sum := sha256.Sum256(data)
 						newAuthHashes[path] = hex.EncodeToString(sum[:])
@@ -196,7 +194,7 @@ func (w *Watcher) loadFileClients(cfg *config.Config) int {
 			log.Debugf("error accessing path %s: %v", path, err)
 			return err
 		}
-		if !info.IsDir() && strings.HasSuffix(strings.ToLower(info.Name()), ".json") {
+		if !info.IsDir() && strings.HasSuffix(strings.ToLower(info.Name()), ".json") && info.Name() != ".llm-mux-manifest.json" {
 			authFileCount++
 			log.Debugf("processing auth file %d: %s", authFileCount, filepath.Base(path))
 			// Count readable JSON files as successful auth entries

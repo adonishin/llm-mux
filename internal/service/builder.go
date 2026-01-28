@@ -11,6 +11,7 @@ import (
 	"github.com/nghyane/llm-mux/internal/auth/login"
 	"github.com/nghyane/llm-mux/internal/config"
 	"github.com/nghyane/llm-mux/internal/provider"
+	"github.com/nghyane/llm-mux/internal/usage"
 )
 
 // Builder constructs a Service instance with customizable providers.
@@ -170,16 +171,24 @@ func (b *Builder) Build() (*Service, error) {
 	}
 	accessManager.SetProviders(providers)
 
+	serviceHook := NewServiceHook()
+
 	coreManager := b.coreManager
 	if coreManager == nil {
 		tokenStore := login.GetTokenStore()
 		if dirSetter, ok := tokenStore.(interface{ SetBaseDir(string) }); ok && b.cfg != nil {
 			dirSetter.SetBaseDir(b.cfg.AuthDir)
 		}
-		coreManager = provider.NewManager(tokenStore, nil, nil)
+		coreManager = provider.NewManager(tokenStore, nil, serviceHook)
 	}
 	// Attach a default RoundTripper provider so providers can opt-in per-auth transports.
 	coreManager.SetRoundTripperProvider(newDefaultRoundTripperProvider())
+
+	// Register quota sync plugin if QuotaManager is active
+	if qm := coreManager.GetQuotaManager(); qm != nil {
+		plugin := provider.NewQuotaSyncPlugin(qm)
+		usage.RegisterPlugin(plugin)
+	}
 
 	service := &Service{
 		cfg:            b.cfg,
@@ -193,5 +202,8 @@ func (b *Builder) Build() (*Service, error) {
 		coreManager:    coreManager,
 		serverOptions:  append([]api.ServerOption(nil), b.serverOptions...),
 	}
+
+	serviceHook.SetService(service)
+
 	return service, nil
 }

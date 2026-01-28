@@ -3,8 +3,8 @@ package management
 import (
 	"context"
 	"fmt"
-	"github.com/nghyane/llm-mux/internal/json"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -15,9 +15,10 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/nghyane/llm-mux/internal/auth/login"
+	"github.com/nghyane/llm-mux/internal/json"
+	log "github.com/nghyane/llm-mux/internal/logging"
 	"github.com/nghyane/llm-mux/internal/oauth"
 	"github.com/nghyane/llm-mux/internal/provider"
-	log "github.com/nghyane/llm-mux/internal/logging"
 	"github.com/tidwall/gjson"
 )
 
@@ -102,7 +103,7 @@ func (h *Handler) managementCallbackURL(path string) (string, error) {
 
 func (h *Handler) ListAuthFiles(c *gin.Context) {
 	if h == nil {
-		c.JSON(500, gin.H{"error": "handler not initialized"})
+		respondInternalError(c, "handler not initialized")
 		return
 	}
 	if h.authManager == nil {
@@ -110,9 +111,13 @@ func (h *Handler) ListAuthFiles(c *gin.Context) {
 		return
 	}
 	auths := h.authManager.List()
+	quotaManager := h.authManager.GetQuotaManager()
+	now := time.Now()
+
 	files := make([]gin.H, 0, len(auths))
 	for _, auth := range auths {
 		if entry := h.buildAuthFileEntry(auth); entry != nil {
+			h.enrichWithQuotaState(entry, auth.ID, quotaManager, now)
 			files = append(files, entry)
 		}
 	}
@@ -121,14 +126,53 @@ func (h *Handler) ListAuthFiles(c *gin.Context) {
 		nameJ, _ := files[j]["name"].(string)
 		return strings.ToLower(nameI) < strings.ToLower(nameJ)
 	})
-	c.JSON(200, gin.H{"files": files})
+	respondOK(c, gin.H{"files": files})
+}
+
+func (h *Handler) enrichWithQuotaState(entry gin.H, authID string, qm *provider.QuotaManager, now time.Time) {
+	if qm == nil {
+		return
+	}
+	state := qm.GetState(authID)
+	if state == nil {
+		entry["quota_state"] = gin.H{
+			"active_requests":   int64(0),
+			"total_tokens_used": int64(0),
+			"in_cooldown":       false,
+		}
+		return
+	}
+
+	inCooldown := now.Before(state.CooldownUntil)
+	qs := gin.H{
+		"active_requests":   state.ActiveRequests,
+		"total_tokens_used": state.TotalTokensUsed,
+		"in_cooldown":       inCooldown,
+	}
+
+	if inCooldown {
+		qs["cooldown_until"] = state.CooldownUntil
+		qs["cooldown_remaining_seconds"] = int64(state.CooldownUntil.Sub(now).Seconds())
+	}
+
+	if state.LearnedLimit > 0 {
+		qs["learned_limit"] = state.LearnedLimit
+	}
+	if state.LearnedCooldown > 0 {
+		qs["learned_cooldown_seconds"] = int64(state.LearnedCooldown.Seconds())
+	}
+	if !state.LastExhaustedAt.IsZero() {
+		qs["last_exhausted_at"] = state.LastExhaustedAt
+	}
+
+	entry["quota_state"] = qs
 }
 
 // List auth files from disk when the auth manager is unavailable.
 func (h *Handler) listAuthFilesFromDisk(c *gin.Context) {
 	entries, err := os.ReadDir(h.cfg.AuthDir)
 	if err != nil {
-		c.JSON(500, gin.H{"error": fmt.Sprintf("failed to read auth dir: %v", err)})
+		respondInternalError(c, fmt.Sprintf("failed to read auth dir: %v", err))
 		return
 	}
 	files := make([]gin.H, 0)
@@ -155,7 +199,7 @@ func (h *Handler) listAuthFilesFromDisk(c *gin.Context) {
 			files = append(files, fileData)
 		}
 	}
-	c.JSON(200, gin.H{"files": files})
+	respondOK(c, gin.H{"files": files})
 }
 
 func (h *Handler) buildAuthFileEntry(auth *provider.Auth) gin.H {
@@ -268,20 +312,20 @@ func isRuntimeOnlyAuth(auth *provider.Auth) bool {
 func (h *Handler) DownloadAuthFile(c *gin.Context) {
 	name := c.Query("name")
 	if name == "" || strings.Contains(name, string(os.PathSeparator)) {
-		c.JSON(400, gin.H{"error": "invalid name"})
+		respondBadRequest(c, "invalid name")
 		return
 	}
 	if !strings.HasSuffix(strings.ToLower(name), ".json") {
-		c.JSON(400, gin.H{"error": "name must end with .json"})
+		respondBadRequest(c, "name must end with .json")
 		return
 	}
 	full := filepath.Join(h.cfg.AuthDir, name)
 	data, err := os.ReadFile(full)
 	if err != nil {
 		if os.IsNotExist(err) {
-			c.JSON(404, gin.H{"error": "file not found"})
+			respondNotFound(c, "file not found")
 		} else {
-			c.JSON(500, gin.H{"error": fmt.Sprintf("failed to read file: %v", err)})
+			respondInternalError(c, fmt.Sprintf("failed to read file: %v", err))
 		}
 		return
 	}
@@ -289,55 +333,61 @@ func (h *Handler) DownloadAuthFile(c *gin.Context) {
 	c.Data(200, "application/json", data)
 }
 
-// Upload auth file: multipart or raw JSON with ?name=
+type uploadResult struct {
+	Name    string `json:"name"`
+	Status  string `json:"status"`
+	Message string `json:"message,omitempty"`
+}
+
 func (h *Handler) UploadAuthFile(c *gin.Context) {
 	if h.authManager == nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "core auth manager unavailable"})
+		respondError(c, http.StatusServiceUnavailable, ErrCodeInternalError, "core auth manager unavailable")
 		return
 	}
 	ctx := c.Request.Context()
-	if file, err := c.FormFile("file"); err == nil && file != nil {
-		name := filepath.Base(file.Filename)
-		if !strings.HasSuffix(strings.ToLower(name), ".json") {
-			c.JSON(400, gin.H{"error": "file must be .json"})
-			return
+
+	if form, err := c.MultipartForm(); err == nil && form != nil && form.File != nil {
+		var files []*multipart.FileHeader
+		if f := form.File["files"]; len(f) > 0 {
+			files = f
+		} else if f := form.File["file[]"]; len(f) > 0 {
+			files = f
+		} else if f := form.File["file"]; len(f) > 0 {
+			files = f
 		}
-		dst := filepath.Join(h.cfg.AuthDir, name)
-		if !filepath.IsAbs(dst) {
-			if abs, errAbs := filepath.Abs(dst); errAbs == nil {
-				dst = abs
+
+		if len(files) > 0 {
+			results := h.processBatchUpload(ctx, files)
+			allOK := true
+			for _, r := range results {
+				if r.Status != "ok" {
+					allOK = false
+					break
+				}
 			}
-		}
-		if errSave := c.SaveUploadedFile(file, dst); errSave != nil {
-			c.JSON(500, gin.H{"error": fmt.Sprintf("failed to save file: %v", errSave)})
+			if allOK {
+				respondOK(c, gin.H{"status": "ok", "count": len(results), "results": results})
+			} else {
+				c.JSON(http.StatusMultiStatus, gin.H{"status": "partial", "count": len(results), "results": results})
+			}
 			return
 		}
-		data, errRead := os.ReadFile(dst)
-		if errRead != nil {
-			c.JSON(500, gin.H{"error": fmt.Sprintf("failed to read saved file: %v", errRead)})
-			return
-		}
-		if errReg := h.registerAuthFromFile(ctx, dst, data); errReg != nil {
-			c.JSON(500, gin.H{"error": errReg.Error()})
-			return
-		}
-		c.JSON(200, gin.H{"status": "ok"})
-		return
 	}
+
 	name := c.Query("name")
 	if name == "" || strings.Contains(name, string(os.PathSeparator)) {
-		c.JSON(400, gin.H{"error": "invalid name"})
+		respondBadRequest(c, "invalid name")
 		return
 	}
 	if !strings.HasSuffix(strings.ToLower(name), ".json") {
-		c.JSON(400, gin.H{"error": "name must end with .json"})
+		respondBadRequest(c, "name must end with .json")
 		return
 	}
 	// Limit request body to 1MB to prevent DoS attacks
 	const maxAuthFileSize = 1 * 1024 * 1024
 	data, err := io.ReadAll(io.LimitReader(c.Request.Body, maxAuthFileSize))
 	if err != nil {
-		c.JSON(400, gin.H{"error": "failed to read body"})
+		respondBadRequest(c, "failed to read body")
 		return
 	}
 	dst := filepath.Join(h.cfg.AuthDir, filepath.Base(name))
@@ -347,27 +397,72 @@ func (h *Handler) UploadAuthFile(c *gin.Context) {
 		}
 	}
 	if errWrite := os.WriteFile(dst, data, 0o600); errWrite != nil {
-		c.JSON(500, gin.H{"error": fmt.Sprintf("failed to write file: %v", errWrite)})
+		respondInternalError(c, fmt.Sprintf("failed to write file: %v", errWrite))
 		return
 	}
 	if err = h.registerAuthFromFile(ctx, dst, data); err != nil {
-		c.JSON(500, gin.H{"error": err.Error()})
+		respondInternalError(c, err.Error())
 		return
 	}
-	c.JSON(200, gin.H{"status": "ok"})
+	h.syncAuthToRemote(ctx, "Upload", name, dst)
+	respondOK(c, gin.H{"status": "ok"})
 }
 
-// Delete auth files: single by name or all
+func (h *Handler) processBatchUpload(ctx context.Context, files []*multipart.FileHeader) []uploadResult {
+	results := make([]uploadResult, 0, len(files))
+	for _, fileHeader := range files {
+		result := h.processOneUpload(ctx, fileHeader)
+		results = append(results, result)
+	}
+	return results
+}
+
+func (h *Handler) processOneUpload(ctx context.Context, fileHeader *multipart.FileHeader) uploadResult {
+	name := filepath.Base(fileHeader.Filename)
+	if !strings.HasSuffix(strings.ToLower(name), ".json") {
+		return uploadResult{Name: name, Status: "error", Message: "file must be .json"}
+	}
+
+	file, err := fileHeader.Open()
+	if err != nil {
+		return uploadResult{Name: name, Status: "error", Message: fmt.Sprintf("failed to open: %v", err)}
+	}
+	defer file.Close()
+
+	data, err := io.ReadAll(file)
+	if err != nil {
+		return uploadResult{Name: name, Status: "error", Message: fmt.Sprintf("failed to read: %v", err)}
+	}
+
+	dst := filepath.Join(h.cfg.AuthDir, name)
+	if !filepath.IsAbs(dst) {
+		if abs, errAbs := filepath.Abs(dst); errAbs == nil {
+			dst = abs
+		}
+	}
+
+	if errWrite := os.WriteFile(dst, data, 0o600); errWrite != nil {
+		return uploadResult{Name: name, Status: "error", Message: fmt.Sprintf("failed to write: %v", errWrite)}
+	}
+
+	if errReg := h.registerAuthFromFile(ctx, dst, data); errReg != nil {
+		return uploadResult{Name: name, Status: "error", Message: errReg.Error()}
+	}
+
+	h.syncAuthToRemote(ctx, "Upload", name, dst)
+	return uploadResult{Name: name, Status: "ok"}
+}
+
 func (h *Handler) DeleteAuthFile(c *gin.Context) {
 	if h.authManager == nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "core auth manager unavailable"})
+		respondError(c, http.StatusServiceUnavailable, ErrCodeInternalError, "core auth manager unavailable")
 		return
 	}
 	ctx := c.Request.Context()
 	if all := c.Query("all"); all == "true" || all == "1" || all == "*" {
 		entries, err := os.ReadDir(h.cfg.AuthDir)
 		if err != nil {
-			c.JSON(500, gin.H{"error": fmt.Sprintf("failed to read auth dir: %v", err)})
+			respondInternalError(c, fmt.Sprintf("failed to read auth dir: %v", err))
 			return
 		}
 		deleted := 0
@@ -385,21 +480,19 @@ func (h *Handler) DeleteAuthFile(c *gin.Context) {
 					full = abs
 				}
 			}
-			if err = os.Remove(full); err == nil {
-				if errDel := h.deleteTokenRecord(ctx, full); errDel != nil {
-					c.JSON(500, gin.H{"error": errDel.Error()})
-					return
-				}
-				deleted++
-				h.disableAuth(ctx, full)
+			if errDel := h.deleteTokenRecord(ctx, full); errDel != nil {
+				respondInternalError(c, errDel.Error())
+				return
 			}
+			deleted++
+			h.disableAuth(ctx, full)
 		}
-		c.JSON(200, gin.H{"status": "ok", "deleted": deleted})
+		respondOK(c, gin.H{"status": "ok", "deleted": deleted})
 		return
 	}
 	name := c.Query("name")
 	if name == "" || strings.Contains(name, string(os.PathSeparator)) {
-		c.JSON(400, gin.H{"error": "invalid name"})
+		respondBadRequest(c, "invalid name")
 		return
 	}
 	full := filepath.Join(h.cfg.AuthDir, filepath.Base(name))
@@ -408,20 +501,16 @@ func (h *Handler) DeleteAuthFile(c *gin.Context) {
 			full = abs
 		}
 	}
-	if err := os.Remove(full); err != nil {
-		if os.IsNotExist(err) {
-			c.JSON(404, gin.H{"error": "file not found"})
-		} else {
-			c.JSON(500, gin.H{"error": fmt.Sprintf("failed to remove file: %v", err)})
-		}
+	if _, err := os.Stat(full); os.IsNotExist(err) {
+		respondNotFound(c, "file not found")
 		return
 	}
 	if err := h.deleteTokenRecord(ctx, full); err != nil {
-		c.JSON(500, gin.H{"error": err.Error()})
+		respondInternalError(c, err.Error())
 		return
 	}
 	h.disableAuth(ctx, full)
-	c.JSON(200, gin.H{"status": "ok"})
+	respondOK(c, gin.H{"status": "ok"})
 }
 
 func (h *Handler) authIDForPath(path string) string {
@@ -563,4 +652,24 @@ func (h *Handler) saveTokenRecord(ctx context.Context, record *provider.Auth) (s
 		return "", fmt.Errorf("token store unavailable")
 	}
 	return store.Save(ctx, record)
+}
+
+type authPersister interface {
+	PersistAuthFiles(ctx context.Context, message string, paths ...string) error
+}
+
+func (h *Handler) syncAuthToRemote(ctx context.Context, action, name, path string) {
+	store := h.tokenStoreWithBaseDir()
+	if store == nil {
+		return
+	}
+	persister, ok := store.(authPersister)
+	if !ok {
+		return
+	}
+	go func() {
+		if err := persister.PersistAuthFiles(ctx, fmt.Sprintf("%s auth %s", action, name), path); err != nil {
+			log.Warnf("failed to sync auth to remote store: %v", err)
+		}
+	}()
 }

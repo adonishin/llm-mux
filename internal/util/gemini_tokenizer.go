@@ -27,6 +27,18 @@ const VideoTokenCostGemini = 2000
 // DocTokenCostGemini is the estimated token cost for file references.
 const DocTokenCostGemini = 500
 
+// Token estimation constants for Claude via Antigravity.
+// Based on observed differences between local estimate and actual API response.
+const (
+	AntigravityBaseOverhead   = 7    // Server-side wrapper tokens
+	AntigravityPerMsgOverhead = 0    // Per-message overhead (included in base for simple cases)
+	AntigravityScalingFactor  = 0.08 // 8% buffer for large inputs
+	LargeInputThreshold       = 100  // Apply scaling above this threshold
+)
+
+// ThinkingModeOverhead is added when thinking/reasoning mode is enabled.
+const ThinkingModeOverhead = 29
+
 // tokenizerCache caches LocalTokenizer instances by normalized model name.
 // This avoids repeated tokenizer initialization which is expensive.
 var (
@@ -72,12 +84,21 @@ func CountTokensFromIR(model string, req *ir.UnifiedChatRequest) int64 {
 // CountGeminiTokensFromIR always uses Gemini tokenizer regardless of model name.
 // Use this when requests are translated to Gemini format (e.g., Claude via Antigravity/Vertex).
 // The backend (Gemini API) will tokenize using Gemini's tokenizer, so we must match that.
+// Adds AntigravityOverhead to account for server-side system prompt/wrapper tokens.
 func CountGeminiTokensFromIR(req *ir.UnifiedChatRequest) int64 {
 	if req == nil {
 		return 0
 	}
-	// Use a standard Gemini model for tokenization
-	return countGeminiTokens("gemini-2.0-flash", req)
+	baseTokens := countGeminiTokens("gemini-2.0-flash", req)
+	msgCount := int64(len(req.Messages))
+
+	overhead := int64(AntigravityBaseOverhead) + (msgCount * AntigravityPerMsgOverhead)
+
+	if baseTokens > LargeInputThreshold {
+		overhead += int64(float64(baseTokens) * AntigravityScalingFactor)
+	}
+
+	return baseTokens + overhead
 }
 
 // mediaCounts tracks non-text media elements for token estimation.
@@ -133,7 +154,25 @@ func countGeminiTokens(model string, req *ir.UnifiedChatRequest) int64 {
 	// Count tool definition tokens
 	toolTokens := countToolTokensFromIR(tok, req.Tools)
 
-	total := contentTokens + toolTokens + media.total()
+	// Count ResponseSchema tokens (structured output JSON schema)
+	schemaTokens := countSchemaTokensFromIR(tok, req.ResponseSchema)
+
+	// Count MCPServers tokens (Claude MCP configs, also relevant for translation)
+	mcpTokens := countMCPServersTokensFromIR(tok, req.MCPServers)
+
+	// Count Prediction content tokens
+	var predictionTokens int64
+	if req.Prediction != nil && req.Prediction.Content != "" {
+		predictionContent := &genai.Content{
+			Role:  "user",
+			Parts: []*genai.Part{genai.NewPartFromText(req.Prediction.Content)},
+		}
+		if result, err := tok.CountTokens([]*genai.Content{predictionContent}, nil); err == nil {
+			predictionTokens = int64(result.TotalTokens)
+		}
+	}
+
+	total := contentTokens + toolTokens + schemaTokens + mcpTokens + predictionTokens + media.total()
 
 	return total
 }
@@ -410,6 +449,50 @@ func countToolTokensFromIR(tok *tokenizer.LocalTokenizer, tools []ir.ToolDefinit
 
 	tokens := int(result.TotalTokens)
 	ToolTokenCache.Set(toolsJSONStr, tokens)
+	return int64(tokens)
+}
+
+func countSchemaTokensFromIR(tok *tokenizer.LocalTokenizer, schema map[string]any) int64 {
+	if schema == nil {
+		return 0
+	}
+	schemaJSON, err := json.Marshal(schema)
+	if err != nil {
+		return 0
+	}
+	return countGeminiJSONBytes(tok, schemaJSON, ToolTokenCache)
+}
+
+func countMCPServersTokensFromIR(tok *tokenizer.LocalTokenizer, servers []ir.MCPServer) int64 {
+	if len(servers) == 0 {
+		return 0
+	}
+	serversJSON, err := json.Marshal(servers)
+	if err != nil {
+		return 0
+	}
+	return countGeminiJSONBytes(tok, serversJSON, ToolTokenCache)
+}
+
+func countGeminiJSONBytes(tok *tokenizer.LocalTokenizer, data []byte, cache *TokenCache) int64 {
+	dataStr := string(data)
+	if cache != nil {
+		if cached, ok := cache.Get(dataStr); ok {
+			return int64(cached)
+		}
+	}
+	content := &genai.Content{
+		Role:  "user",
+		Parts: []*genai.Part{genai.NewPartFromText(dataStr)},
+	}
+	result, err := tok.CountTokens([]*genai.Content{content}, nil)
+	if err != nil {
+		return 0
+	}
+	tokens := int(result.TotalTokens)
+	if cache != nil {
+		cache.Set(dataStr, tokens)
+	}
 	return int64(tokens)
 }
 

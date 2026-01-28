@@ -18,8 +18,9 @@ import (
 	"github.com/fsnotify/fsnotify"
 	"github.com/nghyane/llm-mux/internal/auth/login"
 	"github.com/nghyane/llm-mux/internal/config"
-	"github.com/nghyane/llm-mux/internal/provider"
 	log "github.com/nghyane/llm-mux/internal/logging"
+	"github.com/nghyane/llm-mux/internal/provider"
+	"golang.org/x/sync/singleflight"
 	"gopkg.in/yaml.v3"
 )
 
@@ -66,6 +67,13 @@ type Watcher struct {
 	storePersister    storePersister
 	mirroredAuthDir   string
 	oldConfigYaml     []byte
+	// pendingWrites tracks files being written by the application itself.
+	// Key: absolute file path, Value: expiry time for the pending write marker.
+	// This prevents the watcher from reacting to its own writes.
+	pendingWritesMu sync.RWMutex
+	pendingWrites   map[string]time.Time
+	// persistGroup deduplicates concurrent config persistence calls using singleflight
+	persistGroup singleflight.Group
 }
 
 type stableIDGenerator struct {
@@ -122,6 +130,7 @@ const (
 	// before deciding whether a Remove event indicates a real deletion.
 	replaceCheckDelay    = 50 * time.Millisecond
 	configReloadDebounce = 150 * time.Millisecond
+	pendingWriteTTL      = 2 * time.Second
 )
 
 // NewWatcher creates a new file watcher instance
@@ -136,6 +145,7 @@ func NewWatcher(configPath, authDir string, reloadCallback func(*config.Config))
 		reloadCallback: reloadCallback,
 		watcher:        watcher,
 		lastAuthHashes: make(map[string]string),
+		pendingWrites:  make(map[string]time.Time),
 	}
 	w.dispatchCond = sync.NewCond(&w.dispatchMu)
 	if store := login.GetTokenStore(); store != nil {
@@ -256,7 +266,14 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 	authOps := fsnotify.Create | fsnotify.Write | fsnotify.Remove | fsnotify.Rename
 	isAuthJSON := strings.HasPrefix(event.Name, w.authDir) && strings.HasSuffix(event.Name, ".json") && event.Op&authOps != 0
 	if !isConfigEvent && !isAuthJSON {
-		// Ignore unrelated files (e.g., cookie snapshots *.cookie) and other noise.
+		return
+	}
+	if filepath.Base(event.Name) == ".llm-mux-manifest.json" {
+		return
+	}
+
+	if isAuthJSON && w.isPendingWrite(event.Name) {
+		log.Debugf("skipping self-write event for: %s", filepath.Base(event.Name))
 		return
 	}
 
@@ -280,7 +297,7 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 				log.Debugf("auth file unchanged (hash match), skipping reload: %s", filepath.Base(event.Name))
 				return
 			}
-			log.Infof("auth file changed (%s): %s, processing incrementally", event.Op.String(), filepath.Base(event.Name))
+			log.Debugf("auth file changed (%s): %s, processing incrementally", event.Op.String(), filepath.Base(event.Name))
 			w.addOrUpdateClient(event.Name)
 			return
 		}
@@ -288,7 +305,7 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 			log.Debugf("ignoring remove for unknown auth file: %s", filepath.Base(event.Name))
 			return
 		}
-		log.Infof("auth file changed (%s): %s, processing incrementally", event.Op.String(), filepath.Base(event.Name))
+		log.Debugf("auth file changed (%s): %s, processing incrementally", event.Op.String(), filepath.Base(event.Name))
 		w.removeClient(event.Name)
 		return
 	}
@@ -297,7 +314,48 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 			log.Debugf("auth file unchanged (hash match), skipping reload: %s", filepath.Base(event.Name))
 			return
 		}
-		log.Infof("auth file changed (%s): %s, processing incrementally", event.Op.String(), filepath.Base(event.Name))
+		log.Debugf("auth file changed (%s): %s, processing incrementally", event.Op.String(), filepath.Base(event.Name))
 		w.addOrUpdateClient(event.Name)
 	}
+}
+
+func (w *Watcher) MarkPendingWrite(path string) {
+	if w == nil {
+		return
+	}
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		absPath = path
+	}
+	w.pendingWritesMu.Lock()
+	if w.pendingWrites == nil {
+		w.pendingWrites = make(map[string]time.Time)
+	}
+	w.pendingWrites[absPath] = time.Now().Add(pendingWriteTTL)
+	w.pendingWritesMu.Unlock()
+}
+
+func (w *Watcher) isPendingWrite(path string) bool {
+	if w == nil {
+		return false
+	}
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		absPath = path
+	}
+	w.pendingWritesMu.Lock()
+	defer w.pendingWritesMu.Unlock()
+	if w.pendingWrites == nil {
+		return false
+	}
+	expiry, ok := w.pendingWrites[absPath]
+	if !ok {
+		return false
+	}
+	if time.Now().After(expiry) {
+		delete(w.pendingWrites, absPath)
+		return false
+	}
+	delete(w.pendingWrites, absPath)
+	return true
 }

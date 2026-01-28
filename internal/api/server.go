@@ -24,7 +24,6 @@ import (
 	"github.com/nghyane/llm-mux/internal/api/modules"
 	ampmodule "github.com/nghyane/llm-mux/internal/api/modules/amp"
 	"github.com/nghyane/llm-mux/internal/config"
-	"github.com/nghyane/llm-mux/internal/logging"
 	log "github.com/nghyane/llm-mux/internal/logging"
 	"github.com/nghyane/llm-mux/internal/provider"
 	"github.com/nghyane/llm-mux/internal/registry"
@@ -37,7 +36,7 @@ type serverOptionConfig struct {
 	extraMiddleware      []gin.HandlerFunc
 	engineConfigurator   func(*gin.Engine)
 	routerConfigurator   func(*gin.Engine, *format.BaseAPIHandler, *config.Config)
-	requestLoggerFactory func(*config.Config, string) logging.RequestLogger
+	requestLoggerFactory func(*config.Config, string) log.RequestLogger
 	localPassword        string
 	keepAliveEnabled     bool
 	keepAliveTimeout     time.Duration
@@ -47,12 +46,12 @@ type serverOptionConfig struct {
 // ServerOption customises HTTP server construction.
 type ServerOption func(*serverOptionConfig)
 
-func defaultRequestLoggerFactory(cfg *config.Config, configPath string) logging.RequestLogger {
+func defaultRequestLoggerFactory(cfg *config.Config, configPath string) log.RequestLogger {
 	configDir := filepath.Dir(configPath)
 	if base := util.WritablePath(); base != "" {
-		return logging.NewFileRequestLogger(cfg.RequestLog, filepath.Join(base, "logs"), configDir)
+		return log.NewFileRequestLogger(cfg.RequestLog, filepath.Join(base, "logs"), configDir)
 	}
-	return logging.NewFileRequestLogger(cfg.RequestLog, "logs", configDir)
+	return log.NewFileRequestLogger(cfg.RequestLog, "logs", configDir)
 }
 
 // WithMiddleware appends additional Gin middleware during server construction.
@@ -96,7 +95,7 @@ func WithKeepAliveEndpoint(timeout time.Duration, onTimeout func()) ServerOption
 }
 
 // WithRequestLoggerFactory customises request logger creation.
-func WithRequestLoggerFactory(factory func(*config.Config, string) logging.RequestLogger) ServerOption {
+func WithRequestLoggerFactory(factory func(*config.Config, string) log.RequestLogger) ServerOption {
 	return func(cfg *serverOptionConfig) {
 		cfg.requestLoggerFactory = factory
 	}
@@ -113,7 +112,7 @@ type Server struct {
 	oldConfigYaml []byte
 
 	accessManager  *access.Manager
-	requestLogger  logging.RequestLogger
+	requestLogger  log.RequestLogger
 	loggerToggle   func(bool)
 	configFilePath string
 	currentPath    string
@@ -162,15 +161,15 @@ func NewServer(cfg *config.Config, authManager *provider.Manager, accessManager 
 		optionState.engineConfigurator(engine)
 	}
 
-	engine.Use(logging.GinLogrusLogger())
-	engine.Use(logging.GinLogrusRecovery())
+	engine.Use(log.GinLogrusLogger())
+	engine.Use(log.GinLogrusRecovery())
 	for _, mw := range optionState.extraMiddleware {
 		engine.Use(mw)
 	}
 
 	// Add request logging middleware (positioned after recovery, before auth)
 	// Resolve logs directory relative to the configuration file directory.
-	var requestLogger logging.RequestLogger
+	var requestLogger log.RequestLogger
 	var toggle func(bool)
 	if optionState.requestLoggerFactory != nil {
 		requestLogger = optionState.requestLoggerFactory(cfg, configFilePath)
@@ -325,7 +324,7 @@ func (s *Server) Stop(ctx context.Context) error {
 	}
 
 	// Stop usage persistence and flush pending writes
-	if err := usage.StopPersistence(); err != nil {
+	if err := usage.Stop(); err != nil {
 		log.Warnf("Failed to stop usage persistence: %v", err)
 	}
 
@@ -373,19 +372,21 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 	}
 
 	if oldCfg != nil && oldCfg.LoggingToFile != cfg.LoggingToFile {
-		if err := logging.ConfigureLogOutput(cfg.LoggingToFile); err != nil {
+		if err := log.ConfigureLogOutput(cfg.LoggingToFile); err != nil {
 			log.Errorf("failed to reconfigure log output: %v", err)
 		} else {
 			log.Debugf("logging_to_file updated from %t to %t", oldCfg.LoggingToFile, cfg.LoggingToFile)
 		}
 	}
 
-	if oldCfg == nil || oldCfg.UsageStatisticsEnabled != cfg.UsageStatisticsEnabled {
-		usage.SetStatisticsEnabled(cfg.UsageStatisticsEnabled)
+	oldUsageEnabled := oldCfg != nil && oldCfg.Usage.DSN != ""
+	newUsageEnabled := cfg.Usage.DSN != ""
+	if oldCfg == nil || oldUsageEnabled != newUsageEnabled {
+		usage.SetStatisticsEnabled(newUsageEnabled)
 		if oldCfg != nil {
-			log.Debugf("usage_statistics_enabled updated from %t to %t", oldCfg.UsageStatisticsEnabled, cfg.UsageStatisticsEnabled)
+			log.Debugf("usage_statistics_enabled updated from %t to %t", oldUsageEnabled, newUsageEnabled)
 		} else {
-			log.Debugf("usage_statistics_enabled toggled to %t", cfg.UsageStatisticsEnabled)
+			log.Debugf("usage_statistics_enabled toggled to %t", newUsageEnabled)
 		}
 	}
 

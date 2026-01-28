@@ -16,12 +16,14 @@ import (
 	"github.com/nghyane/llm-mux/internal/api"
 	"github.com/nghyane/llm-mux/internal/auth/login"
 	"github.com/nghyane/llm-mux/internal/config"
+	log "github.com/nghyane/llm-mux/internal/logging"
 	"github.com/nghyane/llm-mux/internal/provider"
+	"github.com/nghyane/llm-mux/internal/runtime/executor"
+	"github.com/nghyane/llm-mux/internal/transport"
 	"github.com/nghyane/llm-mux/internal/usage"
 	"github.com/nghyane/llm-mux/internal/util"
 	"github.com/nghyane/llm-mux/internal/watcher"
 	"github.com/nghyane/llm-mux/internal/wsrelay"
-	log "github.com/nghyane/llm-mux/internal/logging"
 )
 
 // Service wraps the proxy server lifecycle so external programs can embed the CLI proxy.
@@ -247,6 +249,7 @@ func (s *Service) applyCoreAuthAddOrUpdate(ctx context.Context, auth *provider.A
 	auth = auth.Clone()
 	s.ensureExecutorsForAuth(auth)
 	s.registerModelsForAuth(auth)
+	s.coreManager.PreWarmToken(auth)
 	if existing, ok := s.coreManager.GetByID(auth.ID); ok && existing != nil {
 		auth.CreatedAt = existing.CreatedAt
 		auth.LastRefreshedAt = existing.LastRefreshedAt
@@ -284,6 +287,10 @@ func (s *Service) applyRetryConfig(cfg *config.Config) {
 	}
 	maxInterval := time.Duration(cfg.MaxRetryInterval) * time.Second
 	s.coreManager.SetRetryConfig(cfg.RequestRetry, maxInterval)
+
+	if cfg.StreamTimeout > 0 {
+		transport.Config.ResponseHeaderTimeout = time.Duration(cfg.StreamTimeout) * time.Second
+	}
 }
 
 func openAICompatInfoFromAuth(a *provider.Auth) (providerKey string, compatName string, ok bool) {
@@ -336,6 +343,13 @@ func (s *Service) Run(ctx context.Context) error {
 	}
 	if ctx == nil {
 		ctx = context.Background()
+	}
+
+	if s.coreManager != nil {
+		if qm := s.coreManager.GetQuotaManager(); qm != nil {
+			usage.RegisterPlugin(provider.NewQuotaSyncPlugin(qm))
+			qm.Start()
+		}
 	}
 
 	usage.StartDefault(ctx)
@@ -407,6 +421,8 @@ func (s *Service) Run(ctx context.Context) error {
 		s.hooks.OnBeforeStart(s.cfg)
 	}
 
+	go executor.PrewarmAntigravityConnections(ctx)
+
 	s.serverErr = make(chan error, 1)
 	go func() {
 		if errStart := s.server.Start(); errStart != nil {
@@ -416,7 +432,13 @@ func (s *Service) Run(ctx context.Context) error {
 		}
 	}()
 
-	time.Sleep(100 * time.Millisecond)
+	select {
+	case err := <-s.serverErr:
+		if err != nil {
+			return fmt.Errorf("cliproxy: server failed to start: %w", err)
+		}
+	case <-time.After(100 * time.Millisecond):
+	}
 	fmt.Printf("API server started successfully on: %d\n", s.cfg.Port)
 
 	if s.hooks.OnAfterStart != nil {
@@ -453,6 +475,7 @@ func (s *Service) Run(ctx context.Context) error {
 		return fmt.Errorf("cliproxy: failed to create watcher: %w", err)
 	}
 	s.watcher = watcherWrapper
+	login.RegisterPendingWriteNotifier(watcherWrapper)
 	s.ensureAuthUpdateQueue(ctx)
 	if s.authUpdates != nil {
 		watcherWrapper.SetAuthUpdateQueue(s.authUpdates)
@@ -506,6 +529,9 @@ func (s *Service) Shutdown(ctx context.Context) error {
 		}
 		if s.coreManager != nil {
 			s.coreManager.StopAutoRefresh()
+			if qm := s.coreManager.GetQuotaManager(); qm != nil {
+				qm.Stop()
+			}
 		}
 		if s.watcher != nil {
 			if err := s.watcher.Stop(); err != nil {

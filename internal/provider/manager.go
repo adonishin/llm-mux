@@ -13,6 +13,7 @@ import (
 	"github.com/nghyane/llm-mux/internal/registry"
 	"github.com/nghyane/llm-mux/internal/resilience"
 	"github.com/sony/gobreaker"
+	"golang.org/x/sync/semaphore"
 )
 
 func init() {
@@ -27,15 +28,10 @@ func init() {
 
 // ProviderExecutor defines the contract required by Manager to execute provider calls.
 type ProviderExecutor interface {
-	// Identifier returns the provider key handled by this executor.
 	Identifier() string
-	// Execute handles non-streaming execution and returns the provider response payload.
 	Execute(ctx context.Context, auth *Auth, req Request, opts Options) (Response, error)
-	// ExecuteStream handles streaming execution and returns a channel of provider chunks.
 	ExecuteStream(ctx context.Context, auth *Auth, req Request, opts Options) (<-chan StreamChunk, error)
-	// Refresh attempts to refresh provider credentials and returns the updated auth state.
 	Refresh(ctx context.Context, auth *Auth) (*Auth, error)
-	// CountTokens returns the token count for the given request.
 	CountTokens(ctx context.Context, auth *Auth, req Request, opts Options) (Response, error)
 }
 
@@ -96,8 +92,7 @@ type Manager struct {
 	mu        sync.RWMutex
 	auths     map[string]*Auth
 
-	providerCounter atomic.Uint64
-	providerStats   *ProviderStats
+	providerStats *ProviderStats
 
 	requestRetry     atomic.Int32
 	maxRetryInterval atomic.Int64
@@ -105,28 +100,46 @@ type Manager struct {
 	rtProvider RoundTripperProvider
 
 	refreshCancel context.CancelFunc
+	refreshSem    *semaphore.Weighted
 
-	breakerMu sync.RWMutex
-	breakers  map[string]*resilience.CircuitBreaker
+	breakerMu         sync.RWMutex
+	breakers          map[string]*resilience.CircuitBreaker
+	streamingBreakers map[string]*resilience.StreamingCircuitBreaker
+
+	retryBudget  *resilience.RetryBudget
+	registry     *AuthRegistry
+	quotaManager *QuotaManager
 }
 
 // NewManager constructs a manager with optional custom selector and hook.
+// If no selector is provided, uses QuotaManager with provider-aware quota tracking.
 func NewManager(store Store, selector Selector, hook Hook) *Manager {
+	var quotaManager *QuotaManager
 	if selector == nil {
-		selector = &RoundRobinSelector{}
+		quotaManager = NewQuotaManager()
+		selector = quotaManager
+	} else if qm, ok := selector.(*QuotaManager); ok {
+		quotaManager = qm
 	}
 	if hook == nil {
 		hook = NoopHook{}
 	}
 	m := &Manager{
-		store:         store,
-		executors:     make(map[string]ProviderExecutor),
-		selector:      selector,
-		hook:          hook,
-		auths:         make(map[string]*Auth),
-		providerStats: NewProviderStats(),
-		breakers:      make(map[string]*resilience.CircuitBreaker),
+		store:             store,
+		executors:         make(map[string]ProviderExecutor),
+		selector:          selector,
+		hook:              hook,
+		auths:             make(map[string]*Auth),
+		providerStats:     NewProviderStats(),
+		breakers:          make(map[string]*resilience.CircuitBreaker),
+		streamingBreakers: make(map[string]*resilience.StreamingCircuitBreaker),
+		retryBudget:       resilience.NewRetryBudget(100),
+		refreshSem:        newRefreshSemaphore(),
+		quotaManager:      quotaManager,
 	}
+	m.registry = NewAuthRegistry(store, hook, m.quotaManager)
+	m.registry.SetExecutorProvider(m.executorFor)
+	m.registry.Start()
 	if lc, ok := selector.(SelectorLifecycle); ok {
 		lc.Start()
 	}
@@ -137,6 +150,9 @@ func NewManager(store Store, selector Selector, hook Hook) *Manager {
 func (m *Manager) Stop() {
 	if m.refreshCancel != nil {
 		m.refreshCancel()
+	}
+	if m.registry != nil {
+		m.registry.Stop()
 	}
 	m.mu.RLock()
 	selector := m.selector
@@ -208,8 +224,12 @@ func (m *Manager) Register(ctx context.Context, auth *Auth) (*Auth, error) {
 	m.mu.Lock()
 	m.auths[auth.ID] = auth.Clone()
 	m.mu.Unlock()
+	if m.registry != nil {
+		_, _ = m.registry.Register(ctx, auth)
+	}
 	_ = m.persist(ctx, auth)
 	m.hook.OnAuthRegistered(ctx, auth.Clone())
+
 	return auth.Clone(), nil
 }
 
@@ -226,8 +246,12 @@ func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
 	auth.EnsureIndex()
 	m.auths[auth.ID] = auth.Clone()
 	m.mu.Unlock()
+	if m.registry != nil {
+		_, _ = m.registry.Update(ctx, auth)
+	}
 	_ = m.persist(ctx, auth)
 	m.hook.OnAuthUpdated(ctx, auth.Clone())
+
 	return auth.Clone(), nil
 }
 
@@ -250,6 +274,9 @@ func (m *Manager) Load(ctx context.Context) error {
 		auth.EnsureIndex()
 		m.auths[auth.ID] = auth.Clone()
 	}
+	if m.registry != nil {
+		_ = m.registry.Load(ctx)
+	}
 	return nil
 }
 
@@ -271,6 +298,14 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req Request, 
 	var lastErr error
 	var lastProvider string
 	for attempt := 0; attempt < attempts; attempt++ {
+		acquiredBudget := false
+		if attempt > 0 {
+			if !m.retryBudget.TryAcquire() {
+				break
+			}
+			acquiredBudget = true
+		}
+
 		start := time.Now()
 		resp, errExec := m.executeProvidersOnce(ctx, selected, func(execCtx context.Context, provider string) (Response, error) {
 			lastProvider = provider
@@ -281,6 +316,9 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req Request, 
 		if errExec == nil {
 			// Record success for weighted selection
 			m.recordProviderResult(lastProvider, req.Model, true, latency)
+			if acquiredBudget {
+				m.retryBudget.Release()
+			}
 			return resp, nil
 		}
 
@@ -288,12 +326,15 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req Request, 
 		m.recordProviderResult(lastProvider, req.Model, false, latency)
 		lastErr = errExec
 
-		wait, shouldRetry := m.shouldRetryAfterError(errExec, attempt, attempts, selected, req.Model, maxWait)
-		if !shouldRetry {
+		if acquiredBudget {
+			m.retryBudget.Release()
+		}
+
+		if !m.shouldRetryAfterError(errExec, attempt, attempts, selected, req.Model) {
 			break
 		}
-		if errWait := waitForCooldown(ctx, wait); errWait != nil {
-			return Response{}, errWait
+		if errWait := m.waitForAvailableAuth(ctx, selected, req.Model, maxWait); errWait != nil {
+			break
 		}
 	}
 	if lastErr != nil {
@@ -320,6 +361,14 @@ func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req Requ
 	var lastErr error
 	var lastProvider string
 	for attempt := 0; attempt < attempts; attempt++ {
+		acquiredBudget := false
+		if attempt > 0 {
+			if !m.retryBudget.TryAcquire() {
+				break
+			}
+			acquiredBudget = true
+		}
+
 		start := time.Now()
 		resp, errExec := m.executeProvidersOnce(ctx, selected, func(execCtx context.Context, provider string) (Response, error) {
 			lastProvider = provider
@@ -329,18 +378,24 @@ func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req Requ
 
 		if errExec == nil {
 			m.recordProviderResult(lastProvider, req.Model, true, latency)
+			if acquiredBudget {
+				m.retryBudget.Release()
+			}
 			return resp, nil
 		}
 
 		m.recordProviderResult(lastProvider, req.Model, false, latency)
 		lastErr = errExec
 
-		wait, shouldRetry := m.shouldRetryAfterError(errExec, attempt, attempts, selected, req.Model, maxWait)
-		if !shouldRetry {
+		if acquiredBudget {
+			m.retryBudget.Release()
+		}
+
+		if !m.shouldRetryAfterError(errExec, attempt, attempts, selected, req.Model) {
 			break
 		}
-		if errWait := waitForCooldown(ctx, wait); errWait != nil {
-			return Response{}, errWait
+		if errWait := m.waitForAvailableAuth(ctx, selected, req.Model, maxWait); errWait != nil {
+			break
 		}
 	}
 	if lastErr != nil {
@@ -351,6 +406,7 @@ func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req Requ
 
 // ExecuteStream performs a streaming execution using the configured selector and executor.
 // It supports multiple providers for the same model with weighted selection based on performance.
+// Stats tracking is now consolidated in executeStreamWithProvider to reduce wrapper overhead.
 func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req Request, opts Options) (<-chan StreamChunk, error) {
 	normalized := m.normalizeProviders(providers)
 	if len(normalized) == 0 {
@@ -365,28 +421,39 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req Req
 	}
 
 	var lastErr error
-	var lastProvider string
 	for attempt := 0; attempt < attempts; attempt++ {
-		start := time.Now()
+		acquiredBudget := false
+		if attempt > 0 {
+			if !m.retryBudget.TryAcquire() {
+				break
+			}
+			acquiredBudget = true
+		}
+
+		// Stats are now tracked inside executeStreamWithProvider - no need for wrapStreamForStats
 		chunks, errStream := m.executeStreamProvidersOnce(ctx, selected, func(execCtx context.Context, provider string) (<-chan StreamChunk, error) {
-			lastProvider = provider
 			return m.executeStreamWithProvider(execCtx, provider, req, opts)
 		})
 
 		if errStream == nil {
-			// Wrap channel to track completion for stats
-			return m.wrapStreamForStats(ctx, chunks, lastProvider, req.Model, start), nil
+			if acquiredBudget {
+				m.retryBudget.Release()
+			}
+			// Return directly - stats tracking is now inline in executeStreamWithProvider
+			return chunks, nil
 		}
 
-		m.recordProviderResult(lastProvider, req.Model, false, time.Since(start))
 		lastErr = errStream
 
-		wait, shouldRetry := m.shouldRetryAfterError(errStream, attempt, attempts, selected, req.Model, maxWait)
-		if !shouldRetry {
+		if acquiredBudget {
+			m.retryBudget.Release()
+		}
+
+		if !m.shouldRetryAfterError(errStream, attempt, attempts, selected, req.Model) {
 			break
 		}
-		if errWait := waitForCooldown(ctx, wait); errWait != nil {
-			return nil, errWait
+		if errWait := m.waitForAvailableAuth(ctx, selected, req.Model, maxWait); errWait != nil {
+			break
 		}
 	}
 	if lastErr != nil {
@@ -396,7 +463,28 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req Req
 }
 
 // MarkResult records an execution result and notifies hooks.
+// Uses async worker to reduce lock contention in the hot path.
 func (m *Manager) MarkResult(ctx context.Context, result Result) {
+	if result.AuthID == "" {
+		return
+	}
+	// Delegate to AuthRegistry for lock-free path
+	if m.registry != nil {
+		m.registry.MarkResult(ctx, result)
+		if result.Error != nil && result.Error.HTTPStatus == 429 {
+			if qm, ok := m.selector.(*QuotaManager); ok {
+				qm.RecordQuotaHit(result.AuthID, result.Provider, result.Model, result.RetryAfter)
+			}
+		}
+		return
+	}
+	// Fallback to sync processing when registry is not available (legacy mode)
+	m.markResultSync(ctx, result)
+}
+
+// markResultSync is the synchronous fallback for MarkResult.
+// Used when async worker is not available or queue is full.
+func (m *Manager) markResultSync(ctx context.Context, result Result) {
 	if result.AuthID == "" {
 		return
 	}
@@ -448,14 +536,14 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 				}
 				category := CategorizeError(statusCode, errMsg)
 
-				// User errors (400) should NOT mark auth as unavailable
-				if category != CategoryUserError {
+				// User errors (400) and client cancellation should NOT mark auth as unavailable
+				if category != CategoryUserError && category != CategoryClientCanceled {
 					state.Unavailable = true
 					state.Status = StatusError
 				}
 				state.UpdatedAt = now
-				// Only record error details for non-user errors
-				if result.Error != nil && category != CategoryUserError {
+				// Only record error details for non-user errors and non-cancellation
+				if result.Error != nil && category != CategoryUserError && category != CategoryClientCanceled {
 					state.LastError = cloneError(result.Error)
 					state.StatusMessage = result.Error.Message
 					auth.LastError = cloneError(result.Error)
@@ -517,7 +605,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 				}
 
 				// Only update auth-level status for non-user errors
-				if category != CategoryUserError {
+				if category != CategoryUserError && category != CategoryClientCanceled {
 					auth.Status = StatusError
 				}
 				auth.UpdatedAt = now
@@ -541,6 +629,12 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 		registry.GetGlobalRegistry().ResumeClientModel(result.AuthID, result.Model)
 	} else if shouldSuspendModel {
 		registry.GetGlobalRegistry().SuspendClientModel(result.AuthID, result.Model, suspendReason)
+	}
+
+	if result.Error != nil && result.Error.HTTPStatus == 429 {
+		if qm, ok := m.selector.(*QuotaManager); ok {
+			qm.RecordQuotaHit(result.AuthID, result.Provider, result.Model, result.RetryAfter)
+		}
 	}
 
 	m.hook.OnResult(ctx, result)
@@ -589,18 +683,22 @@ func (m *Manager) GetByID(id string) (*Auth, bool) {
 }
 
 func (m *Manager) pickNext(ctx context.Context, provider, model string, opts Options, tried map[string]struct{}) (*Auth, ProviderExecutor, error) {
+	// Phase 1: Quick read-locked filter to collect candidate pointers
 	m.mu.RLock()
 	executor, okExecutor := m.executors[provider]
 	if !okExecutor {
 		m.mu.RUnlock()
 		return nil, nil, &Error{Code: "executor_not_found", Message: "executor not registered"}
 	}
-	candidates := make([]*Auth, 0, len(m.auths))
+
 	// Avoid allocation when model doesn't need trimming
 	modelKey := model
 	if len(model) > 0 && (model[0] == ' ' || model[len(model)-1] == ' ') {
 		modelKey = strings.TrimSpace(model)
 	}
+
+	// Collect candidate pointers under lock (cheap - no cloning yet)
+	candidatePtrs := make([]*Auth, 0, len(m.auths))
 	registryRef := registry.GetGlobalRegistry()
 	for _, candidate := range m.auths {
 		if candidate.Provider != provider || candidate.Disabled {
@@ -612,23 +710,32 @@ func (m *Manager) pickNext(ctx context.Context, provider, model string, opts Opt
 		if modelKey != "" && registryRef != nil && !registryRef.ClientSupportsModel(candidate.ID, modelKey) {
 			continue
 		}
-		candidates = append(candidates, candidate)
+		candidatePtrs = append(candidatePtrs, candidate)
 	}
-	if len(candidates) == 0 {
+	if len(candidatePtrs) == 0 {
 		m.mu.RUnlock()
 		return nil, nil, &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
+
+	// Phase 2: Clone candidates while still under RLock (necessary for consistent snapshot)
+	// But now we only clone the filtered set, not all candidates
+	candidates := make([]*Auth, len(candidatePtrs))
+	for i, ptr := range candidatePtrs {
+		candidates[i] = ptr.Clone()
+	}
+	m.mu.RUnlock()
+
+	// Phase 3: Selector runs outside lock - OK because we have cloned data
 	selected, errPick := m.selector.Pick(ctx, provider, model, opts, candidates)
 	if errPick != nil {
-		m.mu.RUnlock()
 		return nil, nil, errPick
 	}
 	if selected == nil {
-		m.mu.RUnlock()
 		return nil, nil, &Error{Code: "auth_not_found", Message: "selector returned no auth"}
 	}
-	authCopy := selected.Clone()
-	m.mu.RUnlock()
+
+	// Phase 4: Handle index assignment (rare path)
+	authCopy := selected
 	if !selected.indexAssigned {
 		m.mu.Lock()
 		if current := m.auths[authCopy.ID]; current != nil && !current.indexAssigned {
@@ -638,6 +745,53 @@ func (m *Manager) pickNext(ctx context.Context, provider, model string, opts Opt
 		m.mu.Unlock()
 	}
 	return authCopy, executor, nil
+}
+
+func (m *Manager) pickNextFromRegistry(ctx context.Context, provider, model string, opts Options, tried map[string]struct{}) (*Auth, ProviderExecutor, error) {
+	if m.registry == nil {
+		return m.pickNext(ctx, provider, model, opts, tried)
+	}
+
+	m.mu.RLock()
+	executor, okExecutor := m.executors[provider]
+	m.mu.RUnlock()
+	if !okExecutor {
+		return nil, nil, &Error{Code: "executor_not_found", Message: "executor not registered"}
+	}
+
+	modelKey := model
+	if len(model) > 0 && (model[0] == ' ' || model[len(model)-1] == ' ') {
+		modelKey = strings.TrimSpace(model)
+	}
+
+	var entries []*AuthEntry
+	registryRef := registry.GetGlobalRegistry()
+	for _, entry := range m.registry.ListByProvider(provider) {
+		if entry.IsDisabled() {
+			continue
+		}
+		if _, used := tried[entry.ID()]; used {
+			continue
+		}
+		if modelKey != "" && registryRef != nil && !registryRef.ClientSupportsModel(entry.ID(), modelKey) {
+			continue
+		}
+		entries = append(entries, entry)
+	}
+
+	if len(entries) == 0 {
+		return nil, nil, &Error{Code: "auth_not_found", Message: "no auth available"}
+	}
+
+	selected, errPick := m.registry.Pick(ctx, provider, model, opts, entries)
+	if errPick != nil {
+		return nil, nil, errPick
+	}
+	if selected == nil {
+		return nil, nil, &Error{Code: "auth_not_found", Message: "selector returned no auth"}
+	}
+
+	return selected.ToAuth(), executor, nil
 }
 
 func (m *Manager) persist(ctx context.Context, auth *Auth) error {
@@ -691,8 +845,21 @@ func (m *Manager) refreshAuth(ctx context.Context, id string) {
 	if err != nil {
 		m.mu.Lock()
 		if current := m.auths[id]; current != nil && current.UpdatedAt == authUpdatedAt {
+			errMsg := err.Error()
+			if isOAuthRevokedError(errMsg) {
+				log.Warnf("disabling auth %s due to OAuth revocation: %s", id, errMsg)
+				current.Disabled = true
+				current.Status = StatusDisabled
+				current.StatusMessage = "oauth_token_revoked: " + errMsg
+				current.LastError = &Error{Message: errMsg}
+				current.UpdatedAt = now
+				m.auths[id] = current
+				m.mu.Unlock()
+				_, _ = m.Update(ctx, current)
+				return
+			}
 			current.NextRefreshAfter = now.Add(refreshFailureBackoff)
-			current.LastError = &Error{Message: err.Error()}
+			current.LastError = &Error{Message: errMsg}
 			m.auths[id] = current
 		}
 		m.mu.Unlock()
@@ -744,6 +911,25 @@ type RequestPreparer interface {
 	PrepareRequest(req *http.Request, auth *Auth) error
 }
 
+type TokenPreWarmer interface {
+	PreWarmToken(auth *Auth)
+}
+
+func (m *Manager) PreWarmToken(auth *Auth) {
+	if auth == nil || auth.Disabled {
+		return
+	}
+	m.mu.RLock()
+	exec := m.executors[auth.Provider]
+	m.mu.RUnlock()
+	if exec == nil {
+		return
+	}
+	if pw, ok := exec.(TokenPreWarmer); ok {
+		pw.PreWarmToken(auth)
+	}
+}
+
 // InjectCredentials delegates per-provider HTTP request preparation when supported.
 // If the registered executor for the auth provider implements RequestPreparer,
 // it will be invoked to modify the request (e.g., add headers).
@@ -790,6 +976,29 @@ func (m *Manager) getOrCreateBreaker(provider string) *resilience.CircuitBreaker
 	return cb
 }
 
+func (m *Manager) getOrCreateStreamingBreaker(provider string) *resilience.StreamingCircuitBreaker {
+	m.breakerMu.RLock()
+	if cb, ok := m.streamingBreakers[provider]; ok {
+		m.breakerMu.RUnlock()
+		return cb
+	}
+	m.breakerMu.RUnlock()
+
+	m.breakerMu.Lock()
+	defer m.breakerMu.Unlock()
+	if cb, ok := m.streamingBreakers[provider]; ok {
+		return cb
+	}
+
+	cfg := resilience.DefaultBreakerConfig("streaming:" + provider)
+	cfg.OnStateChange = func(name string, from, to gobreaker.State) {
+		log.Infof("circuit breaker %s: %s -> %s", name, from, to)
+	}
+	cb := resilience.NewStreamingCircuitBreaker(cfg)
+	m.streamingBreakers[provider] = cb
+	return cb
+}
+
 func (m *Manager) BreakerState(provider string) gobreaker.State {
 	m.breakerMu.RLock()
 	cb, ok := m.breakers[provider]
@@ -798,4 +1007,36 @@ func (m *Manager) BreakerState(provider string) gobreaker.State {
 		return gobreaker.StateClosed
 	}
 	return cb.State()
+}
+
+// RetryBudgetStats returns current retry budget status.
+func (m *Manager) RetryBudgetStats() (available, max int64) {
+	if m.retryBudget == nil {
+		return 0, 0
+	}
+	return m.retryBudget.Available(), m.retryBudget.MaxCapacity()
+}
+
+// GetQuotaManager returns the QuotaManager if it is the configured selector.
+func (m *Manager) GetQuotaManager() *QuotaManager {
+	if m == nil {
+		return nil
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if qm, ok := m.selector.(*QuotaManager); ok {
+		return qm
+	}
+	return nil
+}
+
+func (m *Manager) AuthRegistry() *AuthRegistry {
+	return m.registry
+}
+
+func (m *Manager) GetAuthEntry(id string) *AuthEntry {
+	if m.registry == nil {
+		return nil
+	}
+	return m.registry.GetEntry(id)
 }

@@ -102,19 +102,18 @@ See [Providers](providers.md) for available models.
 
 ## Management API
 
-Requires `X-Management-Key` header. Get key with `llm-mux --init`.
+See [management-api.yaml](management-api.yaml) for full OpenAPI specification.
 
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/v0/management/config` | GET | Runtime config |
-| `/v0/management/config.yaml` | GET/PUT | Config file |
-| `/v0/management/providers` | GET/PUT/DELETE | Provider configs |
-| `/v0/management/usage` | GET | Usage statistics |
-| `/v0/management/logs` | GET/DELETE | Server logs |
-| `/v0/management/debug` | GET/PUT | Debug mode |
-| `/v0/management/auth-files` | GET/POST/DELETE | OAuth tokens |
+Base path: `/v1/management` | Auth: `X-Management-Key` header or `Authorization: Bearer <key>`
 
 ```bash
-# Example
-curl -H "X-Management-Key: $KEY" http://localhost:8317/v0/management/usage
+# Generate management key
+llm-mux init
+
+# Local access (only needs key)
+curl -H "X-Management-Key: $KEY" http://localhost:8317/v1/management/config
+
+# Remote access (needs both key AND allow-remote)
+# Set LLM_MUX_ALLOW_REMOTE=true or config allow-remote: true
+curl -H "Authorization: Bearer $KEY" http://your-server:8317/v1/management/config
 ```

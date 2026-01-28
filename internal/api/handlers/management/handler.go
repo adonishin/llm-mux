@@ -28,36 +28,29 @@ type attemptInfo struct {
 
 // Handler aggregates config reference, persistence path and helpers.
 type Handler struct {
-	cfg                 *config.Config
-	cfgMu               sync.RWMutex // protects cfg for concurrent read/write during hot-reload
-	configFilePath      string
-	mu                  sync.Mutex
-	attemptsMu          sync.Mutex
-	failedAttempts      map[string]*attemptInfo // keyed by client IP
-	authManager         *provider.Manager
-	usageStats          *usage.RequestStatistics
-	tokenStore          provider.Store
-	localPassword       string
-	allowRemoteOverride bool
-	logDir              string
-	httpClient          *http.Client
-	httpClientOnce      sync.Once
+	cfg            *config.Config
+	cfgMu          sync.RWMutex // protects cfg for concurrent read/write during hot-reload
+	configFilePath string
+	mu             sync.Mutex
+	attemptsMu     sync.Mutex
+	failedAttempts map[string]*attemptInfo // keyed by client IP
+	authManager    *provider.Manager
+	usagePlugin    *usage.LoggerPlugin
+	tokenStore     provider.Store
+	localPassword  string
+	logDir         string
+	httpClient     *http.Client
+	httpClientOnce sync.Once
 }
 
-// NewHandler creates a new management handler instance.
 func NewHandler(cfg *config.Config, configFilePath string, manager *provider.Manager) *Handler {
-	// Check if MANAGEMENT_PASSWORD env is set to enable remote override
-	envSecret, _ := os.LookupEnv("MANAGEMENT_PASSWORD")
-	envSecret = strings.TrimSpace(envSecret)
-
 	return &Handler{
-		cfg:                 cfg,
-		configFilePath:      configFilePath,
-		failedAttempts:      make(map[string]*attemptInfo),
-		authManager:         manager,
-		usageStats:          usage.GetRequestStatistics(),
-		tokenStore:          login.GetTokenStore(),
-		allowRemoteOverride: envSecret != "",
+		cfg:            cfg,
+		configFilePath: configFilePath,
+		failedAttempts: make(map[string]*attemptInfo),
+		authManager:    manager,
+		usagePlugin:    usage.GetLoggerPlugin(),
+		tokenStore:     login.GetTokenStore(),
 	}
 }
 
@@ -85,8 +78,8 @@ func (h *Handler) getHTTPClient() *http.Client {
 // SetAuthManager updates the auth manager reference used by management endpoints.
 func (h *Handler) SetAuthManager(manager *provider.Manager) { h.authManager = manager }
 
-// SetUsageStatistics allows replacing the usage statistics reference.
-func (h *Handler) SetUsageStatistics(stats *usage.RequestStatistics) { h.usageStats = stats }
+// SetUsagePlugin allows replacing the usage plugin reference.
+func (h *Handler) SetUsagePlugin(plugin *usage.LoggerPlugin) { h.usagePlugin = plugin }
 
 // SetLocalPassword configures the runtime-local password accepted for localhost requests.
 func (h *Handler) SetLocalPassword(password string) { h.localPassword = password }
@@ -121,11 +114,10 @@ func (h *Handler) Middleware() gin.HandlerFunc {
 		localClient := clientIP == "127.0.0.1" || clientIP == "::1"
 		cfg := h.getConfig()
 		var allowRemote bool
-		allowRemote = true
 		if cfg != nil {
 			allowRemote = cfg.RemoteManagement.AllowRemote
 		}
-		if h.allowRemoteOverride {
+		if v, hasEnv := os.LookupEnv("LLM_MUX_ALLOW_REMOTE"); hasEnv && (v == "true" || v == "1") {
 			allowRemote = true
 		}
 
@@ -141,7 +133,8 @@ func (h *Handler) Middleware() gin.HandlerFunc {
 					if time.Now().Before(ai.blockedUntil) {
 						remaining := time.Until(ai.blockedUntil).Round(time.Second)
 						h.attemptsMu.Unlock()
-						c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": fmt.Sprintf("IP banned due to too many failed attempts. Try again in %s", remaining)})
+						respondError(c, http.StatusForbidden, ErrCodeForbidden, fmt.Sprintf("IP banned due to too many failed attempts. Try again in %s", remaining))
+						c.Abort()
 						return
 					}
 					// Ban expired, reset state
@@ -152,7 +145,8 @@ func (h *Handler) Middleware() gin.HandlerFunc {
 			h.attemptsMu.Unlock()
 
 			if !allowRemote {
-				c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "remote management disabled"})
+				respondError(c, http.StatusForbidden, ErrCodeForbidden, "remote management disabled")
+				c.Abort()
 				return
 			}
 
@@ -174,7 +168,8 @@ func (h *Handler) Middleware() gin.HandlerFunc {
 
 		// Check if management key is configured
 		if managementKey == "" {
-			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "management key not configured"})
+			respondError(c, http.StatusForbidden, ErrCodeForbidden, "management key not configured")
+			c.Abort()
 			return
 		}
 
@@ -196,7 +191,8 @@ func (h *Handler) Middleware() gin.HandlerFunc {
 			if !localClient {
 				fail()
 			}
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "missing management key"})
+			respondUnauthorized(c, "missing management key")
+			c.Abort()
 			return
 		}
 
@@ -215,7 +211,8 @@ func (h *Handler) Middleware() gin.HandlerFunc {
 			if !localClient {
 				fail()
 			}
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "invalid management key"})
+			respondUnauthorized(c, "invalid management key")
+			c.Abort()
 			return
 		}
 
@@ -233,22 +230,30 @@ func (h *Handler) Middleware() gin.HandlerFunc {
 	}
 }
 
-// persist saves the current in-memory config to disk.
+// persist saves the current in-memory config to disk and sends JSON response.
 func (h *Handler) persist(c *gin.Context) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	// Preserve comments when writing
 	cfg := h.getConfig()
 	if err := config.SaveConfigPreserveComments(h.configFilePath, cfg); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to save config: %v", err)})
+		respondError(c, http.StatusInternalServerError, ErrCodeWriteFailed, fmt.Sprintf("failed to save config: %v", err))
 		return false
 	}
-	c.JSON(http.StatusOK, gin.H{"status": "ok"})
+	respondOK(c, gin.H{"status": "ok"})
 	return true
 }
 
-// Helper methods for simple types
-func (h *Handler) updateBoolField(c *gin.Context, set func(bool)) {
+// persistSilent saves the current in-memory config to disk without sending response.
+// Returns true on success, false on failure.
+func (h *Handler) persistSilent() bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	cfg := h.getConfig()
+	return config.SaveConfigPreserveComments(h.configFilePath, cfg) == nil
+}
+
+func (h *Handler) bindBoolValue(c *gin.Context) (bool, bool) {
 	var body struct {
 		Value *bool `json:"value"`
 	}
@@ -257,39 +262,34 @@ func (h *Handler) updateBoolField(c *gin.Context, set func(bool)) {
 		if err2 := c.ShouldBindJSON(&m); err2 == nil {
 			for _, v := range m {
 				if b, ok := v.(bool); ok {
-					set(b)
-					h.persist(c)
-					return
+					return b, true
 				}
 			}
 		}
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
-		return
+		respondBadRequest(c, "invalid body: expected {\"value\": bool}")
+		return false, false
 	}
-	set(*body.Value)
-	h.persist(c)
+	return *body.Value, true
 }
 
-func (h *Handler) updateIntField(c *gin.Context, set func(int)) {
+func (h *Handler) bindIntValue(c *gin.Context) (int, bool) {
 	var body struct {
 		Value *int `json:"value"`
 	}
 	if err := c.ShouldBindJSON(&body); err != nil || body.Value == nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
-		return
+		respondBadRequest(c, "invalid body: expected {\"value\": int}")
+		return 0, false
 	}
-	set(*body.Value)
-	h.persist(c)
+	return *body.Value, true
 }
 
-func (h *Handler) updateStringField(c *gin.Context, set func(string)) {
+func (h *Handler) bindStringValue(c *gin.Context) (string, bool) {
 	var body struct {
 		Value *string `json:"value"`
 	}
 	if err := c.ShouldBindJSON(&body); err != nil || body.Value == nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
-		return
+		respondBadRequest(c, "invalid body: expected {\"value\": string}")
+		return "", false
 	}
-	set(*body.Value)
-	h.persist(c)
+	return *body.Value, true
 }

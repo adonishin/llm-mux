@@ -2,8 +2,7 @@ package ir
 
 import (
 	"crypto/rand"
-	"fmt"
-	"github.com/nghyane/llm-mux/internal/json"
+	"errors"
 	"strings"
 	"sync"
 	"unicode/utf8"
@@ -48,7 +47,7 @@ func Ptr[T any](v T) *T {
 }
 
 // ErrInvalidJSON is returned when JSON parsing fails.
-var ErrInvalidJSON = &json.UnmarshalTypeError{Value: "invalid json"}
+var ErrInvalidJSON = errors.New("invalid json")
 
 // ExtractThoughtSignature extracts thought signature from a gjson.Result.
 // Returns []byte as per SDK spec. Handles both camelCase and snake_case field names.
@@ -185,7 +184,7 @@ func CleanJsonSchema(schema map[string]any) map[string]any {
 }
 
 func GenToolCallID() string {
-	return fmt.Sprintf("call_%s", generateAlphanumeric(24))
+	return "call_" + generateAlphanumeric(24)
 }
 
 func generateAlphanumeric(length int) string {
@@ -208,7 +207,7 @@ func generateAlphanumeric(length int) string {
 }
 
 func GenClaudeToolCallID() string {
-	return fmt.Sprintf("toolu_%s", generateAlphanumeric(20))
+	return "toolu_" + generateAlphanumeric(20)
 }
 
 // Tool ID Conversion Functions

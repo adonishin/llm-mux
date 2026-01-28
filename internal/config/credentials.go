@@ -10,6 +10,9 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/nghyane/llm-mux/internal/json"
+	"github.com/nghyane/llm-mux/internal/logging"
 )
 
 const (
@@ -19,8 +22,8 @@ const (
 )
 
 type Credentials struct {
-	ManagementKey string    `json:"management_key"`
-	CreatedAt     time.Time `json:"created_at"`
+	ManagementKey string    `json:"management-key"`
+	CreatedAt     time.Time `json:"created-at"`
 	Version       int       `json:"version"`
 }
 
@@ -61,9 +64,11 @@ func GenerateManagementKey() (string, error) {
 
 // LoadCredentials loads credentials with priority: ENV > file
 func LoadCredentials() (*Credentials, error) {
-	// Priority 1: Environment variable
-	if key := strings.TrimSpace(os.Getenv("MANAGEMENT_PASSWORD")); key != "" {
-		return &Credentials{ManagementKey: key, CreatedAt: time.Now(), Version: CredentialsVersion}, nil
+	// Priority 1: Environment variable (LLM_MUX_MANAGEMENT_KEY with legacy fallback)
+	for _, envKey := range []string{"LLM_MUX_MANAGEMENT_KEY", "MANAGEMENT_PASSWORD"} {
+		if key := strings.TrimSpace(os.Getenv(envKey)); key != "" {
+			return &Credentials{ManagementKey: key, CreatedAt: time.Now(), Version: CredentialsVersion}, nil
+		}
 	}
 
 	// Priority 2: Cache
@@ -96,6 +101,24 @@ func LoadCredentials() (*Credentials, error) {
 	if err := json.Unmarshal(data, &creds); err != nil {
 		return nil, err
 	}
+
+	// Migration: handle old snake_case format
+	if creds.ManagementKey == "" {
+		var oldCreds struct {
+			ManagementKey string    `json:"management_key"`
+			CreatedAt     time.Time `json:"created_at"`
+			Version       int       `json:"version"`
+		}
+		if json.Unmarshal(data, &oldCreds) == nil && oldCreds.ManagementKey != "" {
+			logging.Warn("credentials.json uses deprecated snake_case format, migrating to kebab-case")
+			creds.ManagementKey = oldCreds.ManagementKey
+			creds.CreatedAt = oldCreds.CreatedAt
+			creds.Version = oldCreds.Version
+			// Auto-migrate: save in new format
+			_ = SaveCredentials(&creds)
+		}
+	}
+
 	if creds.ManagementKey == "" {
 		return nil, nil
 	}

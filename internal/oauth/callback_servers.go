@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -123,29 +124,24 @@ func (m *CallbackServersManager) ensureServerRunning(port int, providers []strin
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	// Check if already running
 	if server, exists := m.servers[port]; exists && server.running {
 		return nil
 	}
 
-	// Create listener
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		return fmt.Errorf("failed to listen on %s: %w", addr, err)
 	}
 
-	// Create HTTP handler that routes all paths to our callback handler
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		code := r.URL.Query().Get("code")
 		state := r.URL.Query().Get("state")
 		errStr := r.URL.Query().Get("error")
 
-		// Determine provider from port
 		provider := m.getProviderForPort(port)
 
-		// Call the handler and get HTML response
 		html := m.handler(provider, code, state, errStr)
 
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -319,7 +315,7 @@ func (m *CallbackServersManager) StartForwarder(port int, provider, targetBase s
 		if raw := r.URL.RawQuery; raw != "" {
 			if len(target) > 0 && target[len(target)-1] == '?' {
 				target = target + raw
-			} else if containsRune(target, '?') {
+			} else if strings.ContainsRune(target, '?') {
 				target = target + "&" + raw
 			} else {
 				target = target + "?" + raw
@@ -390,14 +386,4 @@ func (m *CallbackServersManager) stopForwarderInstance(forwarder *ForwarderServe
 	}
 
 	log.Infof("callback forwarder on port %d stopped", forwarder.port)
-}
-
-// containsRune checks if string contains a specific rune.
-func containsRune(s string, r rune) bool {
-	for _, c := range s {
-		if c == r {
-			return true
-		}
-	}
-	return false
 }

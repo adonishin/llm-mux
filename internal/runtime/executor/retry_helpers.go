@@ -18,6 +18,7 @@ type RetryConfig struct {
 	MaxRetries       int
 	BaseDelay        time.Duration
 	MaxDelay         time.Duration
+	FallbackDelay    time.Duration
 	RetryStatusCodes []int
 	FallbackCodes    []int
 	RetryOnErrors    bool
@@ -57,6 +58,7 @@ func DefaultRetryConfig() RetryConfig {
 		MaxRetries:       1,
 		BaseDelay:        RateLimitBaseDelay,
 		MaxDelay:         RateLimitMaxDelay,
+		FallbackDelay:    100 * time.Millisecond,
 		RetryStatusCodes: []int{500},
 		FallbackCodes:    []int{429, 502, 503, 504},
 		RetryOnErrors:    true,
@@ -68,6 +70,7 @@ func AntigravityRetryConfig() RetryConfig {
 		MaxRetries:       1,
 		BaseDelay:        AntigravityRetryBaseDelay,
 		MaxDelay:         AntigravityRetryMaxDelay,
+		FallbackDelay:    0, // No delay: sandbox/prod URLs have independent rate limits
 		RetryStatusCodes: []int{500},
 		FallbackCodes:    []int{429, 502, 503, 504},
 		RetryOnErrors:    true,
@@ -105,16 +108,32 @@ func (h *RetryHandler) HandleResponse(ctx context.Context, statusCode int, body 
 	isRetryable := h.isRetryableStatus(statusCode)
 	isFallbackCode := h.isFallbackCode(statusCode)
 
-	// Fallback codes (429, 503) should immediately try next target if available.
-	// This allows Provider Manager to handle cross-auth/cross-provider fallback.
+	// Smart Retry for Fallback codes (429, 503):
+	// Instead of failing immediately, check if the requested wait time is short (transient error).
+	// If wait time is short (<= MaxDelay), treat as retryable to preserve sticky session.
+	// If wait time is long (Quota exceeded), fail immediately to trigger Provider Manager rotation.
+	if isFallbackCode {
+		delay := h.calculateDelay(body)
+		if delay <= h.config.MaxDelay {
+			log.Debugf("retry_handler: status %d (fallback code), but delay %v is within limit, converting to local retry", statusCode, delay)
+			isRetryable = true
+			isFallbackCode = false
+		}
+	}
+
 	if isFallbackCode {
 		if hasNextTarget {
-			log.Debugf("retry_handler: status %d, falling back to next target", statusCode)
+			if h.config.FallbackDelay > 0 {
+				select {
+				case <-ctx.Done():
+					return RetryActionFail, ctx.Err()
+				case <-time.After(h.config.FallbackDelay):
+				}
+			}
+			log.Debugf("retry_handler: status %d, trying next executor target", statusCode)
 			return RetryActionContinueNext, nil
 		}
-		// No next target - fail immediately so Provider Manager can try other auths.
-		// Do NOT retry with delay here; that blocks the request unnecessarily.
-		log.Debugf("retry_handler: status %d, no fallback target, failing to allow provider-level fallback", statusCode)
+		log.Debugf("retry_handler: status %d, executor targets exhausted, returning to manager for account rotation", statusCode)
 		return RetryActionFail, nil
 	}
 
@@ -226,12 +245,25 @@ type rateLimitRetrier struct {
 	retryCount int
 }
 
+// RateLimitRetrier is an exported alias for rateLimitRetrier.
+type RateLimitRetrier = rateLimitRetrier
+
 type rateLimitAction int
+
+// RateLimitAction is an exported alias for rateLimitAction.
+type RateLimitAction = rateLimitAction
 
 const (
 	rateLimitActionContinue rateLimitAction = iota
 	rateLimitActionRetry
 	rateLimitActionMaxExceeded
+)
+
+// Exported constants for rate limit actions.
+const (
+	RateLimitActionContinue    = rateLimitActionContinue
+	RateLimitActionRetry       = rateLimitActionRetry
+	RateLimitActionMaxExceeded = rateLimitActionMaxExceeded
 )
 
 func (r *rateLimitRetrier) handleRateLimit(ctx context.Context, hasNextModel bool, errorBody []byte) (rateLimitAction, error) {
@@ -255,6 +287,11 @@ func (r *rateLimitRetrier) handleRateLimit(ctx context.Context, hasNextModel boo
 	}
 
 	return rateLimitActionRetry, nil
+}
+
+// HandleRateLimit is an exported alias for handleRateLimit.
+func (r *RateLimitRetrier) HandleRateLimit(ctx context.Context, hasNextModel bool, errorBody []byte) (RateLimitAction, error) {
+	return r.handleRateLimit(ctx, hasNextModel, errorBody)
 }
 
 func (r *rateLimitRetrier) calculateDelay(errorBody []byte) time.Duration {
@@ -295,12 +332,18 @@ func parseRetryDelay(errorBody []byte) (*time.Duration, error) {
 				if err != nil {
 					return nil, fmt.Errorf("failed to parse duration: %w", err)
 				}
-				return &duration, nil
+				capped := capQuotaDelay(duration)
+				return &capped, nil
 			}
 		}
 	}
 
 	return nil, fmt.Errorf("no RetryInfo found")
+}
+
+// ParseRetryDelay is an exported alias for parseRetryDelay.
+func ParseRetryDelay(errorBody []byte) (*time.Duration, error) {
+	return parseRetryDelay(errorBody)
 }
 
 func ParseQuotaRetryDelay(errorBody []byte) *time.Duration {

@@ -4,40 +4,13 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"github.com/nghyane/llm-mux/internal/json"
-	"reflect"
 	"sort"
 	"strings"
-	"time"
 
 	"github.com/nghyane/llm-mux/internal/config"
+	"github.com/nghyane/llm-mux/internal/json"
 	"github.com/nghyane/llm-mux/internal/provider"
 )
-
-func computeVertexCompatModelsHash(models []config.VertexCompatModel) string {
-	if len(models) == 0 {
-		return ""
-	}
-	data, err := json.Marshal(models)
-	if err != nil || len(data) == 0 {
-		return ""
-	}
-	sum := sha256.Sum256(data)
-	return hex.EncodeToString(sum[:])
-}
-
-// computeClaudeModelsHash returns a stable hash for Claude model aliases.
-func computeClaudeModelsHash(models []config.ProviderModel) string {
-	if len(models) == 0 {
-		return ""
-	}
-	data, err := json.Marshal(models)
-	if err != nil || len(data) == 0 {
-		return ""
-	}
-	sum := sha256.Sum256(data)
-	return hex.EncodeToString(sum[:])
-}
 
 func computeExcludedModelsHash(excluded []string) string {
 	if len(excluded) == 0 {
@@ -164,24 +137,6 @@ func diffOAuthExcludedModelChanges(oldMap, newMap map[string][]string) ([]string
 	return changes, affected
 }
 
-func authEqual(a, b *provider.Auth) bool {
-	return reflect.DeepEqual(normalizeAuth(a), normalizeAuth(b))
-}
-
-func normalizeAuth(a *provider.Auth) *provider.Auth {
-	if a == nil {
-		return nil
-	}
-	clone := a.Clone()
-	clone.CreatedAt = time.Time{}
-	clone.UpdatedAt = time.Time{}
-	clone.LastRefreshedAt = time.Time{}
-	clone.NextRefreshAfter = time.Time{}
-	clone.Runtime = nil
-	clone.Quota.NextRecoverAt = time.Time{}
-	return clone
-}
-
 func applyAuthExcludedModelsMeta(auth *provider.Auth, cfg *config.Config, perKey []string, authKind string) {
 	if auth == nil || cfg == nil {
 		return
@@ -222,132 +177,6 @@ func applyAuthExcludedModelsMeta(auth *provider.Auth, cfg *config.Config, perKey
 	}
 }
 
-func diffProviders(oldList, newList []config.Provider) []string {
-	changes := make([]string, 0)
-	oldMap := make(map[string]config.Provider, len(oldList))
-	oldLabels := make(map[string]string, len(oldList))
-	for idx, entry := range oldList {
-		key, label := providerKey(entry, idx)
-		oldMap[key] = entry
-		oldLabels[key] = label
-	}
-	newMap := make(map[string]config.Provider, len(newList))
-	newLabels := make(map[string]string, len(newList))
-	for idx, entry := range newList {
-		key, label := providerKey(entry, idx)
-		newMap[key] = entry
-		newLabels[key] = label
-	}
-	keySet := make(map[string]struct{}, len(oldMap)+len(newMap))
-	for key := range oldMap {
-		keySet[key] = struct{}{}
-	}
-	for key := range newMap {
-		keySet[key] = struct{}{}
-	}
-	orderedKeys := make([]string, 0, len(keySet))
-	for key := range keySet {
-		orderedKeys = append(orderedKeys, key)
-	}
-	sort.Strings(orderedKeys)
-	for _, key := range orderedKeys {
-		oldEntry, oldOk := oldMap[key]
-		newEntry, newOk := newMap[key]
-		label := oldLabels[key]
-		if label == "" {
-			label = newLabels[key]
-		}
-		switch {
-		case !oldOk:
-			changes = append(changes, fmt.Sprintf("provider added: %s (api-keys=%d, models=%d)", label, countAPIKeys(newEntry), countProviderModels(newEntry.Models)))
-		case !newOk:
-			changes = append(changes, fmt.Sprintf("provider removed: %s (api-keys=%d, models=%d)", label, countAPIKeys(oldEntry), countProviderModels(oldEntry.Models)))
-		default:
-			if detail := describeProviderUpdate(oldEntry, newEntry); detail != "" {
-				changes = append(changes, fmt.Sprintf("provider updated: %s %s", label, detail))
-			}
-		}
-	}
-	return changes
-}
-
-func describeProviderUpdate(oldEntry, newEntry config.Provider) string {
-	oldKeyCount := countAPIKeys(oldEntry)
-	newKeyCount := countAPIKeys(newEntry)
-	oldModelCount := countProviderModels(oldEntry.Models)
-	newModelCount := countProviderModels(newEntry.Models)
-	details := make([]string, 0, 3)
-	if oldKeyCount != newKeyCount {
-		details = append(details, fmt.Sprintf("api-keys %d -> %d", oldKeyCount, newKeyCount))
-	}
-	if oldModelCount != newModelCount {
-		details = append(details, fmt.Sprintf("models %d -> %d", oldModelCount, newModelCount))
-	}
-	if !equalStringMap(oldEntry.Headers, newEntry.Headers) {
-		details = append(details, "headers updated")
-	}
-	if len(details) == 0 {
-		return ""
-	}
-	return "(" + strings.Join(details, ", ") + ")"
-}
-
-func countAPIKeys(entry config.Provider) int {
-	count := 0
-	for _, keyEntry := range entry.GetAPIKeys() {
-		if strings.TrimSpace(keyEntry.Key) != "" {
-			count++
-		}
-	}
-	return count
-}
-
-func countProviderModels(models []config.ProviderModel) int {
-	count := 0
-	for _, model := range models {
-		name := strings.TrimSpace(model.Name)
-		alias := strings.TrimSpace(model.Alias)
-		if name == "" && alias == "" {
-			continue
-		}
-		count++
-	}
-	return count
-}
-
-func providerKey(entry config.Provider, index int) (string, string) {
-	name := strings.TrimSpace(entry.Name)
-	if name != "" {
-		return "name:" + name, name
-	}
-	base := strings.TrimSpace(entry.BaseURL)
-	if base != "" {
-		return "base:" + base, base
-	}
-	for _, model := range entry.Models {
-		alias := strings.TrimSpace(model.Alias)
-		if alias == "" {
-			alias = strings.TrimSpace(model.Name)
-		}
-		if alias != "" {
-			return "alias:" + alias, alias
-		}
-	}
-	return fmt.Sprintf("index:%d", index), fmt.Sprintf("entry-%d", index+1)
-}
-
-func equalStringMap(a, b map[string]string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for k, v := range a {
-		if b[k] != v {
-			return false
-		}
-	}
-	return true
-}
-
 func trimStrings(in []string) []string {
 	out := make([]string, len(in))
 	for i := range in {
@@ -368,4 +197,73 @@ func addConfigHeadersToAttrs(headers map[string]string, attrs map[string]string)
 		}
 		attrs["header:"+key] = val
 	}
+}
+
+// materialMetadataKeys defines credential fields that require model re-registration when changed.
+var materialMetadataKeys = []string{
+	"refresh_token",
+	"client_id",
+	"client_secret",
+}
+
+// volatileAttributeKeys defines runtime/transient attribute keys ignored for material change detection.
+var volatileAttributeKeys = map[string]struct{}{
+	"last_error":        {},
+	"status_message":    {},
+	"last_refreshed_at": {},
+}
+
+// isMaterialChange returns true if the auth change requires model re-registration.
+// Material changes: Provider, credentials (refresh_token, client_id, client_secret), Attributes.
+// Volatile changes (access_token, expiry, quota, timestamps) return false.
+func isMaterialChange(old, new *provider.Auth) bool {
+	if old == nil || new == nil {
+		return old != new
+	}
+	if old.Provider != new.Provider {
+		return true
+	}
+	for _, key := range materialMetadataKeys {
+		if metadataString(old.Metadata, key) != metadataString(new.Metadata, key) {
+			return true
+		}
+	}
+	return !equalMaterialAttributes(old.Attributes, new.Attributes)
+}
+
+func metadataString(m map[string]any, key string) string {
+	if m == nil {
+		return ""
+	}
+	if v, ok := m[key].(string); ok {
+		return v
+	}
+	return ""
+}
+
+func equalMaterialAttributes(a, b map[string]string) bool {
+	countA := countMaterialAttrs(a)
+	countB := countMaterialAttrs(b)
+	if countA != countB {
+		return false
+	}
+	for k, v := range a {
+		if _, volatile := volatileAttributeKeys[k]; volatile {
+			continue
+		}
+		if b[k] != v {
+			return false
+		}
+	}
+	return true
+}
+
+func countMaterialAttrs(attrs map[string]string) int {
+	count := 0
+	for k := range attrs {
+		if _, volatile := volatileAttributeKeys[k]; !volatile {
+			count++
+		}
+	}
+	return count
 }

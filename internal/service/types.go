@@ -5,6 +5,7 @@ package service
 
 import (
 	"context"
+	"sync"
 
 	"github.com/nghyane/llm-mux/internal/config"
 	"github.com/nghyane/llm-mux/internal/provider"
@@ -78,6 +79,7 @@ type WatcherWrapper struct {
 	snapshotAuths         func() []*provider.Auth
 	setUpdateQueue        func(queue chan<- watcher.AuthUpdate)
 	dispatchRuntimeUpdate func(update watcher.AuthUpdate) bool
+	markPendingWrite      func(path string)
 }
 
 // Start proxies to the underlying watcher Start implementation.
@@ -132,4 +134,42 @@ func (w *WatcherWrapper) SetAuthUpdateQueue(queue chan<- watcher.AuthUpdate) {
 		return
 	}
 	w.setUpdateQueue(queue)
+}
+
+func (w *WatcherWrapper) MarkPendingWrite(path string) {
+	if w == nil || w.markPendingWrite == nil {
+		return
+	}
+	w.markPendingWrite(path)
+}
+
+type ServiceHook struct {
+	provider.NoopHook
+	svc   *Service
+	svcMu sync.RWMutex
+}
+
+func NewServiceHook() *ServiceHook {
+	return &ServiceHook{}
+}
+
+func (h *ServiceHook) SetService(svc *Service) {
+	h.svcMu.Lock()
+	h.svc = svc
+	h.svcMu.Unlock()
+}
+
+func (h *ServiceHook) OnAuthUpdated(ctx context.Context, auth *provider.Auth) {
+	h.svcMu.RLock()
+	svc := h.svc
+	h.svcMu.RUnlock()
+
+	if svc == nil || auth == nil {
+		return
+	}
+	svc.cfgMu.RLock()
+	cfg := svc.cfg
+	svc.cfgMu.RUnlock()
+
+	registerModelsForAuth(auth, cfg, svc.wsGateway)
 }

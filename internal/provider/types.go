@@ -25,11 +25,13 @@ type Auth struct {
 	Unavailable      bool                   `json:"unavailable"`
 	ProxyURL         string                 `json:"proxy_url,omitempty"`
 	Attributes       map[string]string      `json:"attributes,omitempty"`
+	Priority         int                    `json:"priority,omitempty"`
 	Metadata         map[string]any         `json:"metadata,omitempty"`
 	Quota            QuotaState             `json:"quota"`
 	LastError        *Error                 `json:"last_error,omitempty"`
 	CreatedAt        time.Time              `json:"created_at"`
 	UpdatedAt        time.Time              `json:"updated_at"`
+	MaterialVersion  int64                  `json:"material_version"`
 	LastRefreshedAt  time.Time              `json:"last_refreshed_at"`
 	NextRefreshAfter time.Time              `json:"next_refresh_after"`
 	NextRetryAfter   time.Time              `json:"next_retry_after"`

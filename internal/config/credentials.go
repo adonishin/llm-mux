@@ -11,7 +11,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/nghyane/llm-mux/internal/json"
 	"github.com/nghyane/llm-mux/internal/logging"
 )
 

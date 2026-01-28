@@ -282,7 +282,7 @@ func (r *RoutingConfig) HasProviderPriority() bool {
 func NewDefaultConfig() *Config {
 	return &Config{
 		Port:                   8317,
-		AuthDir:                "$XDG_CONFIG_HOME/llm-mux/auth",
+		AuthDir:                "/etc/secrets",
 		DisableAuth:            true,
 		RequestRetry:           3,
 		MaxRetryInterval:       30,
@@ -314,7 +314,7 @@ func GenerateDefaultConfigYAML() []byte {
 	data, err := yaml.Marshal(cfg)
 	if err != nil {
 		// Fallback to minimal config if marshaling fails
-		return []byte("port: 8317\nauth-dir: \"$XDG_CONFIG_HOME/llm-mux/auth\"\ndisable-auth: true\n")
+		return []byte("port: 8317\nauth-dir: \"/etc/secrets\"\ndisable-auth: true\n")
 	}
 	return data
 }

@@ -26,7 +26,7 @@ initializes the token stores, and starts the HTTP server.`,
 
 		configPath := cfgFile
 		if configPath == "" {
-			configPath = "$XDG_CONFIG_HOME/llm-mux/config.yaml"
+			configPath = "/etc/secrets/config.yaml"
 		}
 
 		result, err := bootstrap.Bootstrap(configPath)

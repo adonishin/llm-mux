@@ -21,7 +21,7 @@ Use --force to regenerate the management key.`,
 	Run: func(cmd *cobra.Command, args []string) {
 		configPath := cfgFile
 		if configPath == "" {
-			configPath = "$XDG_CONFIG_HOME/llm-mux/config.yaml"
+			configPath = "/etc/secrets/config.yaml"
 		}
 		if err := DoInitConfig(configPath, forceInit); err != nil {
 			log.Fatalf("Init failed: %v", err)

@@ -103,6 +103,9 @@ func (h *OpenAIAPIHandler) ChatCompletions(c *gin.Context) {
 		return
 	}
 
+	fmt.Printf("ChatCompletions Request Body: %s\n", string(rawJSON))
+
+
 	streamResult := gjson.GetBytes(rawJSON, "stream")
 	if streamResult.Type == gjson.True {
 		h.handleStreamingResponse(c, rawJSON)

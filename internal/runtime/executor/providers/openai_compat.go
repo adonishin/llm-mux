@@ -47,9 +47,11 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *provider.Auth,
 	if err != nil {
 		return resp, err
 	}
+	targetModel := req.Model
 	if modelOverride := e.resolveUpstreamModel(req.Model, auth); modelOverride != "" {
-		translated = e.overrideModel(translated, modelOverride)
+		targetModel = modelOverride
 	}
+	translated = e.overrideModel(translated, targetModel)
 	translated = sseutil.ApplyPayloadConfigWithRoot(e.Cfg, req.Model, "openai", "", translated)
 
 	url := strings.TrimSuffix(baseURL, "/") + "/chat/completions"
@@ -119,9 +121,11 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *provider
 	if err != nil {
 		return nil, err
 	}
+	targetModel := req.Model
 	if modelOverride := e.resolveUpstreamModel(req.Model, auth); modelOverride != "" {
-		translated = e.overrideModel(translated, modelOverride)
+		targetModel = modelOverride
 	}
+	translated = e.overrideModel(translated, targetModel)
 	translated = sseutil.ApplyPayloadConfigWithRoot(e.Cfg, req.Model, "openai", "", translated)
 
 	url := strings.TrimSuffix(baseURL, "/") + "/chat/completions"
@@ -175,9 +179,9 @@ func (e *OpenAICompatExecutor) CountTokens(ctx context.Context, auth *provider.A
 
 	modelForCounting := req.Model
 	if modelOverride := e.resolveUpstreamModel(req.Model, auth); modelOverride != "" {
-		translated = e.overrideModel(translated, modelOverride)
 		modelForCounting = modelOverride
 	}
+	translated = e.overrideModel(translated, modelForCounting)
 
 	enc, err := executor.TokenizerForModel(modelForCounting)
 	if err != nil {

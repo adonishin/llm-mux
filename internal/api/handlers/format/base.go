@@ -340,6 +340,7 @@ func (h *BaseAPIHandler) WriteErrorResponse(c *gin.Context, msg *interfaces.Erro
 	}
 	c.Status(status)
 	if msg != nil && msg.Error != nil {
+		_ = c.Error(msg.Error) // Attach error to Gin context for logging
 		errResp := ErrorResponse{
 			Error: ErrorDetail{
 				Message: msg.Error.Error(),

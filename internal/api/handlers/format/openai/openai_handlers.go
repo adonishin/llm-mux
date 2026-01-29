@@ -94,6 +94,7 @@ func (h *OpenAIAPIHandler) ChatCompletions(c *gin.Context) {
 	rawJSON, err := c.GetRawData()
 	// If data retrieval fails, return a 400 Bad Request error.
 	if err != nil {
+		_ = c.Error(err) // Attach error to Gin context for logging
 		c.JSON(http.StatusBadRequest, format.ErrorResponse{
 			Error: format.ErrorDetail{
 				Message: fmt.Sprintf("Invalid request: %v", err),
@@ -126,6 +127,7 @@ func (h *OpenAIAPIHandler) Completions(c *gin.Context) {
 	rawJSON, err := c.GetRawData()
 	// If data retrieval fails, return a 400 Bad Request error.
 	if err != nil {
+		_ = c.Error(err) // Attach error to Gin context for logging
 		c.JSON(http.StatusBadRequest, format.ErrorResponse{
 			Error: format.ErrorDetail{
 				Message: fmt.Sprintf("Invalid request: %v", err),
@@ -397,7 +399,6 @@ func (h *OpenAIAPIHandler) handleNonStreamingResponse(c *gin.Context, rawJSON []
 		cliCancel(errMsg.Error)
 		return
 	}
-	fmt.Printf("ChatCompletions Response Body: %s\n", string(resp))
 	_, _ = c.Writer.Write(resp)
 	cliCancel()
 }
@@ -542,7 +543,6 @@ func (h *OpenAIAPIHandler) handleStreamResult(c *gin.Context, flusher http.Flush
 				cancel(nil)
 				return
 			}
-			fmt.Printf("ChatCompletions Response Chunk: %s\n", string(chunk))
 			if len(chunk) > 6 && (bytes.HasPrefix(chunk, sseEventPrefix) || bytes.HasPrefix(chunk, sseDataPrefix)) {
 				sw.Write(chunk)
 			} else {

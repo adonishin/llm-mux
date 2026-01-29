@@ -397,6 +397,7 @@ func (h *OpenAIAPIHandler) handleNonStreamingResponse(c *gin.Context, rawJSON []
 		cliCancel(errMsg.Error)
 		return
 	}
+	fmt.Printf("ChatCompletions Response Body: %s\n", string(resp))
 	_, _ = c.Writer.Write(resp)
 	cliCancel()
 }
@@ -541,6 +542,7 @@ func (h *OpenAIAPIHandler) handleStreamResult(c *gin.Context, flusher http.Flush
 				cancel(nil)
 				return
 			}
+			fmt.Printf("ChatCompletions Response Chunk: %s\n", string(chunk))
 			if len(chunk) > 6 && (bytes.HasPrefix(chunk, sseEventPrefix) || bytes.HasPrefix(chunk, sseDataPrefix)) {
 				sw.Write(chunk)
 			} else {

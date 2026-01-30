@@ -329,9 +329,9 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req Request, 
 			return m.executeWithProvider(execCtx, provider, req, opts)
 		})
 		latency := time.Since(start)
+		log.Infof("Successfully executed request using provider: %s, model: %s", lastProvider, req.Model)
 
 		if errExec == nil {
-			log.Infof("Successfully executed request using provider: %s, model: %s", lastProvider, req.Model)
 			// Record success for weighted selection
 			m.recordProviderResult(lastProvider, req.Model, true, latency)
 			if acquiredBudget {
@@ -455,9 +455,9 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req Req
 			lastProvider = provider
 			return m.executeStreamWithProvider(execCtx, provider, req, opts)
 		})
+		log.Infof("Successfully started stream using provider: %s, model: %s", lastProvider, req.Model)
 
 		if errStream == nil {
-			log.Infof("Successfully started stream using provider: %s, model: %s", lastProvider, req.Model)
 			if acquiredBudget {
 				m.retryBudget.Release()
 			}

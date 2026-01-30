@@ -16,6 +16,7 @@ import (
 	"github.com/nghyane/llm-mux/internal/runtime/executor/stream"
 	"github.com/nghyane/llm-mux/internal/sseutil"
 	"github.com/nghyane/llm-mux/internal/util"
+	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
 
@@ -51,6 +52,7 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *provider.Auth,
 	if modelOverride := e.resolveUpstreamModel(req.Model, auth); modelOverride != "" {
 		targetModel = modelOverride
 	}
+	translated = e.replaceModelInContent(translated, req.Model, targetModel)
 	translated = e.overrideModel(translated, targetModel)
 	translated = sseutil.ApplyPayloadConfigWithRoot(e.Cfg, req.Model, "openai", "", translated)
 
@@ -125,6 +127,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *provider
 	if modelOverride := e.resolveUpstreamModel(req.Model, auth); modelOverride != "" {
 		targetModel = modelOverride
 	}
+	translated = e.replaceModelInContent(translated, req.Model, targetModel)
 	translated = e.overrideModel(translated, targetModel)
 	translated = sseutil.ApplyPayloadConfigWithRoot(e.Cfg, req.Model, "openai", "", translated)
 
@@ -181,6 +184,7 @@ func (e *OpenAICompatExecutor) CountTokens(ctx context.Context, auth *provider.A
 	if modelOverride := e.resolveUpstreamModel(req.Model, auth); modelOverride != "" {
 		modelForCounting = modelOverride
 	}
+	translated = e.replaceModelInContent(translated, req.Model, modelForCounting)
 	translated = e.overrideModel(translated, modelForCounting)
 
 	enc, err := executor.TokenizerForModel(modelForCounting)
@@ -270,5 +274,42 @@ func (e *OpenAICompatExecutor) overrideModel(payload []byte, model string) []byt
 		return payload
 	}
 	payload, _ = sjson.SetBytes(payload, "model", model)
+	return payload
+}
+
+func (e *OpenAICompatExecutor) replaceModelInContent(payload []byte, oldVal, newVal string) []byte {
+	if oldVal == "" || newVal == "" || oldVal == newVal {
+		return payload
+	}
+
+	result := gjson.GetBytes(payload, "messages")
+	if !result.Exists() || !result.IsArray() {
+		return payload
+	}
+
+	var pathsToUpdate []string
+	var newValues []string
+
+	result.ForEach(func(key, value gjson.Result) bool {
+		content := value.Get("content")
+		if content.Exists() && content.Type == gjson.String {
+			strVal := content.String()
+			if strings.Contains(strVal, oldVal) {
+				updatedVal := strings.ReplaceAll(strVal, oldVal, newVal)
+				pathsToUpdate = append(pathsToUpdate, fmt.Sprintf("messages.%s.content", key.String()))
+				newValues = append(newValues, updatedVal)
+			}
+		}
+		return true
+	})
+
+	for i, path := range pathsToUpdate {
+		var err error
+		payload, err = sjson.SetBytes(payload, path, newValues[i])
+		if err != nil {
+			log.Warnf("openai compat executor: failed to replace model in content for path %s: %v", path, err)
+		}
+	}
+
 	return payload
 }

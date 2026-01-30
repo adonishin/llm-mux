@@ -314,6 +314,7 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req Request, 
 		latency := time.Since(start)
 
 		if errExec == nil {
+			log.Infof("Successfully executed request using provider: %s, model: %s", lastProvider, req.Model)
 			// Record success for weighted selection
 			m.recordProviderResult(lastProvider, req.Model, true, latency)
 			if acquiredBudget {
@@ -375,6 +376,7 @@ func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req Requ
 			return m.executeCountWithProvider(execCtx, provider, req, opts)
 		})
 		latency := time.Since(start)
+		log.Infof("Successfully executed count using provider: %s, model: %s", lastProvider, req.Model)
 
 		if errExec == nil {
 			m.recordProviderResult(lastProvider, req.Model, true, latency)
@@ -421,6 +423,7 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req Req
 	}
 
 	var lastErr error
+	var lastProvider string
 	for attempt := 0; attempt < attempts; attempt++ {
 		acquiredBudget := false
 		if attempt > 0 {
@@ -432,10 +435,12 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req Req
 
 		// Stats are now tracked inside executeStreamWithProvider - no need for wrapStreamForStats
 		chunks, errStream := m.executeStreamProvidersOnce(ctx, selected, func(execCtx context.Context, provider string) (<-chan StreamChunk, error) {
+			lastProvider = provider
 			return m.executeStreamWithProvider(execCtx, provider, req, opts)
 		})
 
 		if errStream == nil {
+			log.Infof("Successfully started stream using provider: %s, model: %s", lastProvider, req.Model)
 			if acquiredBudget {
 				m.retryBudget.Release()
 			}
